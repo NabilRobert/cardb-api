@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DSS Motor Inventory - Database</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="sidebar">
+    <h1>DSS Motor Inventory</h1>
+    <a href="/index.html">Upload</a>
+    <a href="/database.html" class="active">Database</a>
+  </div>
+
+  <div class="content">
+    <h2>Database</h2>
+    <div class="toolbar">
+      <button id="refreshBtn">Refresh</button>
+      <span class="muted" id="rowCount"></span>
+    </div>
+    <div id="tableContainer">Loading...</div>
+  </div>
+
+  <script>
+    let apiKey = null;
+
+    async function getApiKey() {
+      if (apiKey) return apiKey;
+      const res = await fetch("/api/config");
+      const data = await res.json();
+      apiKey = data.apiKey;
+      return apiKey;
+    }
+
+    async function loadVehicles() {
+      const container = document.getElementById("tableContainer");
+      const rowCount = document.getElementById("rowCount");
+      container.textContent = "Loading...";
+
+      try {
+        const key = await getApiKey();
+        const res = await fetch("/api/vehicles", { headers: { "X-API-Key": key } });
+        const data = await res.json();
+
+        if (!res.ok) {
+          container.innerHTML = `<div class="result-box error">Failed to load: ${data.error}</div>`;
+          return;
+        }
+
+        if (!Array.isArray(data) || data.length === 0) {
+          container.innerHTML = `<p class="muted">No rows yet. Upload a file first.</p>`;
+          rowCount.textContent = "";
+          return;
+        }
+
+        rowCount.textContent = `${data.length} row(s)`;
+
+        const columns = Object.keys(data[0]);
+        let html = "<table><thead><tr>";
+        for (const col of columns) html += `<th>${col}</th>`;
+        html += "</tr></thead><tbody>";
+        for (const row of data) {
+          html += "<tr>";
+          for (const col of columns) {
+            let val = row[col];
+            if (val === null || val === undefined) val = "";
+            html += `<td>${String(val)}</td>`;
+          }
+          html += "</tr>";
+        }
+        html += "</tbody></table>";
+        container.innerHTML = html;
+      } catch (err) {
+        container.innerHTML = `<div class="result-box error">Something went wrong: ${err.message}</div>`;
+      }
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", loadVehicles);
+    loadVehicles();
+  </script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DSS Motor Inventory - Upload</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="sidebar">
+    <h1>DSS Motor Inventory</h1>
+    <a href="/index.html" class="active">Upload</a>
+    <a href="/database.html">Database</a>
+  </div>
+
+  <div class="content">
+    <h2>Upload Inventory Excel</h2>
+    <p class="muted">Drop an .xlsx file below, or click to choose one. It'll be parsed and inserted straight into the database.</p>
+
+    <div class="dropzone" id="dropzone">
+      <div class="big-text">Upload here</div>
+      <div class="sub-text">Click or drag an .xlsx file into this box</div>
+      <input type="file" id="fileInput" accept=".xlsx" />
+    </div>
+
+    <div id="result"></div>
+  </div>
+
+  <script>
+    let apiKey = null;
+
+    async function getApiKey() {
+      if (apiKey) return apiKey;
+      const res = await fetch("/api/config");
+      const data = await res.json();
+      apiKey = data.apiKey;
+      return apiKey;
+    }
+
+    const dropzone = document.getElementById("dropzone");
+    const fileInput = document.getElementById("fileInput");
+    const resultBox = document.getElementById("result");
+
+    dropzone.addEventListener("click", () => fileInput.click());
+
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+
+    dropzone.addEventListener("dragleave", () => {
+      dropzone.classList.remove("dragover");
+    });
+
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+      if (e.dataTransfer.files.length > 0) {
+        uploadFile(e.dataTransfer.files[0]);
+      }
+    });
+
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files.length > 0) {
+        uploadFile(fileInput.files[0]);
+      }
+    });
+
+    async function uploadFile(file) {
+      resultBox.innerHTML = `<div class="result-box">Uploading and parsing "${file.name}"...</div>`;
+
+      try {
+        const key = await getApiKey();
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const res = await fetch("/api/upload", {
+          method: "POST",
+          headers: { "X-API-Key": key },
+          body: formData,
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          resultBox.innerHTML = `<div class="result-box error">Upload failed: ${data.error}${data.detail ? "\n" + data.detail : ""}</div>`;
+          return;
+        }
+
+        let msg = `Inserted ${data.inserted} vehicles (upload_id=${data.uploadId}).`;
+        if (data.skipped && data.skipped.length > 0) {
+          msg += `\n\nSkipped ${data.skipped.length} broken row(s):\n`;
+          msg += data.skipped.map(s => `  - ${s.sheet} row ${s.row}: ${s.reason}`).join("\n");
+        }
+        resultBox.innerHTML = `<div class="result-box success">${msg}</div>`;
+      } catch (err) {
+        resultBox.innerHTML = `<div class="result-box error">Something went wrong: ${err.message}</div>`;
+      }
+    }
+  </script>
+</body>
+</html>
