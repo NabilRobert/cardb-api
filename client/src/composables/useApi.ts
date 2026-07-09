@@ -6,7 +6,7 @@
  * concerns separate from rendering.
  */
 
-import type { Vehicle, UploadResult, ApiErrorBody } from "../types";
+import type { Vehicle, UploadResult, ApiErrorBody, AskResult } from "../types";
 
 let cachedApiKey: string | null = null;
 
@@ -48,4 +48,16 @@ export async function fetchVehicles(): Promise<Vehicle[]> {
     throw new Error(err.error);
   }
   return data as Vehicle[];
+}
+
+export async function askQuestion(question: string): Promise<AskResult> {
+  const headers = await authHeaders();
+  const res = await fetch(`/api/ask?question=${encodeURIComponent(question)}`, { headers });
+  const data = await res.json();
+
+  if (!res.ok) {
+    const err = data as ApiErrorBody;
+    throw new Error(err.detail ? `${err.error}: ${err.detail}` : err.error);
+  }
+  return data as AskResult;
 }

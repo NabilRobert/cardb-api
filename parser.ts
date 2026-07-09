@@ -281,6 +281,105 @@ export function loadSmrSheet(ws: XLSX.WorkSheet): { rows: VehicleRow[]; skipped:
   return { rows, skipped: [] };
 }
 
+export interface DailyReportRecord {
+  license_plate: string;
+  brand: string | null;
+  model_trim: string | null;
+  year: number | null;
+  transmission: string | null;
+  color: string | null;
+  odometer_km: number | null;
+  stnk_expiry_date: Date | null;
+  vin: string | null;
+  engine_no: string | null;
+  purchase_date: Date | null;
+  status: string | null;
+  reserved_by: string | null;
+  source: string | null;
+  ownership: string | null;
+  purchase_price: number | null;
+  recon_cost: number | null;
+  gp_amount: number | null;
+  selling_price_cash: number | null;
+  selling_price_credit: number | null;
+  appraiser: string | null;
+  row_index: number;
+}
+
+/**
+ * 'Daily Report Updated' sheet columns (header row 2, data starts row 7):
+ * A=Appraiser B=Source D=Status E=Nomor Polisi F=Merk G=Tipe H=Transmisi
+ * I=Tahun J=Warna K=Km L=Tgl STNK M=No Rangka N=No Mesin O=Tgl. Beli
+ * Q=Harga Real Jual Credit R=Harga Real Jual Cash AC=HARGA BELI
+ * AJ=Total actual rekondisi AQ=Prediksi GP AW=STATUS KEPEMILIKAN
+ *
+ * Unlike Pricelist, this sheet has an actual purchase date (not derived from
+ * "Age"), plus VIN and engine number that Pricelist doesn't carry at all --
+ * used to enrich vehicles already in the database, not just add new ones.
+ * The sheet also has a stray repeated header row embedded partway through
+ * the data (a section divider); skip rows where the plate cell literally
+ * reads "Nomor Polisi".
+ */
+export function loadDailyReportSheet(ws: XLSX.WorkSheet): { records: DailyReportRecord[] } {
+  const records: DailyReportRecord[] = [];
+  const range = XLSX.utils.decode_range(ws["!ref"] as string);
+
+  for (let r = 7; r <= range.e.r + 1; r++) {
+    const appraiser = getCell(ws, "A", r);
+    const source = getCell(ws, "B", r);
+    const statusCell = getCell(ws, "D", r);
+    const plate = getCell(ws, "E", r);
+    const merk = getCell(ws, "F", r);
+    const tipe = getCell(ws, "G", r);
+    const transmisi = getCell(ws, "H", r);
+    const tahun = getCell(ws, "I", r);
+    const warna = getCell(ws, "J", r);
+    const km = getCell(ws, "K", r);
+    const tglStnk = getCell(ws, "L", r);
+    const noRangka = getCell(ws, "M", r);
+    const noMesin = getCell(ws, "N", r);
+    const tglBeli = getCell(ws, "O", r);
+    const hargaJualKredit = getCell(ws, "Q", r);
+    const hargaJualCash = getCell(ws, "R", r);
+    const hargaBeli = getCell(ws, "AC", r);
+    const totalActualRekondisi = getCell(ws, "AJ", r);
+    const prediksiGp = getCell(ws, "AQ", r);
+    const statusKepemilikan = getCell(ws, "AW", r);
+
+    if (typeof plate.value !== "string" || !plate.value.trim()) continue;
+    if (plate.value.trim() === "Nomor Polisi") continue; // stray repeated header row
+
+    const { status, reservedBy } = parseStatusAndReserved(statusCell.value as string);
+
+    records.push({
+      license_plate: plate.value.trim(),
+      brand: normalizeBrand(merk.value),
+      model_trim: typeof tipe.value === "string" ? tipe.value.trim() : null,
+      year: typeof tahun.value === "number" ? tahun.value : null,
+      transmission: typeof transmisi.value === "string" ? transmisi.value : null,
+      color: typeof warna.value === "string" ? warna.value : null,
+      odometer_km: typeof km.value === "number" ? km.value : null,
+      stnk_expiry_date: parseIndonesianDate(tglStnk.value),
+      vin: typeof noRangka.value === "string" ? noRangka.value.trim() : null,
+      engine_no: typeof noMesin.value === "string" ? noMesin.value.trim() : null,
+      purchase_date: tglBeli.value instanceof Date ? tglBeli.value : null,
+      status,
+      reserved_by: reservedBy,
+      source: typeof source.value === "string" ? source.value.trim() : null,
+      ownership: typeof statusKepemilikan.value === "string" ? statusKepemilikan.value : null,
+      purchase_price: typeof hargaBeli.value === "number" ? hargaBeli.value : null,
+      recon_cost: typeof totalActualRekondisi.value === "number" ? totalActualRekondisi.value : null,
+      gp_amount: typeof prediksiGp.value === "number" ? prediksiGp.value : null,
+      selling_price_cash: typeof hargaJualCash.value === "number" ? hargaJualCash.value : null,
+      selling_price_credit: typeof hargaJualKredit.value === "number" ? hargaJualKredit.value : null,
+      appraiser: typeof appraiser.value === "string" ? appraiser.value.trim() : null,
+      row_index: r,
+    });
+  }
+
+  return { records };
+}
+
 /** Parses every sheet we know how to handle out of a workbook. */
 export function parseWorkbook(wb: XLSX.WorkBook): { rows: VehicleRow[]; skipped: SkippedRow[] } {
   let allRows: VehicleRow[] = [];

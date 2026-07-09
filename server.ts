@@ -1,76 +1,49 @@
 /**
  * server.ts
  *
- * Web app for testing the upload/parse pipeline:
- *   - GET  /                serves the upload homepage (built Vue app, from client-dist/)
- *   - GET  /database.html   serves the data browser page (built Vue app, from client-dist/)
+ * Web app for testing the upload/parse pipeline. The frontend is a single-page
+ * Vue app (client/, one index.html, routed client-side by vue-router) --
+ *   - GET  /                Upload page
+ *   - GET  /database         Database page
+ *   - GET  /ask              Ask AI page
  *   - GET  /api/config      returns the API key so the frontend can auth itself (local/testing convenience)
  *   - POST /api/upload      accepts an .xlsx file, parses it, inserts into the database
  *   - GET  /api/vehicles    returns every row currently in `vehicles`
+ *   - GET  /api/ask         answers a natural-language question about stock (see ai.ts)
+ *
+ * Route handlers live in routes/ (one file per resource, see routes/index.ts),
+ * with shared auth in middleware/apiKey.ts -- this file only wires the app together.
  *
  * The frontend lives in client/ (Vue 3 + TypeScript + Tailwind, built with Vite).
  * Run `npm run build` once to produce client-dist/, then `npm start` to run this server.
  * For frontend development with hot reload, use `npm run dev:client` alongside `npm run dev:server`.
  *
- * Requires DATABASE_URL and API_KEY in .env.
+ * Requires DATABASE_URL, API_KEY, and SUMOPOD_API_KEY in .env.
  */
 
-import express, { Request, Response, NextFunction } from "express";
-import multer from "multer";
-import * as XLSX from "xlsx";
+import express from "express";
 import * as path from "path";
 import * as dotenv from "dotenv";
-import { parseWorkbook } from "./parser";
-import { insertVehicles, getAllVehicles } from "./db";
+import apiRouter from "./routes";
 
 dotenv.config();
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const PORT = process.env.PORT || 3000;
 
-// Every /api/* route except /api/config requires the API key in X-API-Key.
-function requireApiKey(req: Request, res: Response, next: NextFunction) {
-  const key = req.header("X-API-Key");
-  if (!process.env.API_KEY) {
-    return res.status(500).json({ error: "Server misconfigured: API_KEY not set" });
-  }
-  if (key !== process.env.API_KEY) {
-    return res.status(401).json({ error: "Missing or invalid X-API-Key header" });
-  }
-  next();
-}
-
-app.get("/api/config", (_req, res) => {
-  res.json({ apiKey: process.env.API_KEY });
-});
-
-app.post("/api/upload", requireApiKey, upload.single("file"), async (req: Request, res: Response) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded (expected form field 'file')" });
-  }
-  try {
-    const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
-    const { rows, skipped } = parseWorkbook(wb);
-    const { uploadId, inserted } = await insertVehicles(req.file.originalname, rows);
-    res.json({ uploadId, inserted, skipped });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to parse or insert the file", detail: err.message });
-  }
-});
-
-app.get("/api/vehicles", requireApiKey, async (_req: Request, res: Response) => {
-  try {
-    const vehicles = await getAllVehicles();
-    res.json(vehicles);
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to fetch vehicles", detail: err.message });
-  }
-});
+app.use("/api", apiRouter);
 
 app.use(express.static(path.join(__dirname, "client-dist")));
+
+// SPA fallback: any GET request that isn't an API route or a real static
+// file falls through to index.html, letting Vue Router handle the path
+// client-side (so refreshing on /database, /ask, or /api-docs still works).
+// The lookahead requires "/api" to be followed by "/" or end-of-string, not
+// just any path starting with those 4 characters -- otherwise a page like
+// "/api-docs" gets wrongly treated as an API route and 404s.
+app.get(/^(?!\/api(\/|$)).*/, (_req, res) => {
+  res.sendFile(path.join(__dirname, "client-dist", "index.html"));
+});
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);

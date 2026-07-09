@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, toRef, onMounted, onUnmounted } from "vue";
-import FilterDropdown from "./FilterDropdown.vue";
+import TableHeaderCell from "./TableHeaderCell.vue";
 import { useTableFilters, cellVal } from "../composables/useTableFilters";
 import type { Vehicle } from "../types";
 
@@ -58,35 +58,27 @@ defineExpose({ clearAllFilters });
 
 <template>
   <div ref="tableWrapper" class="overflow-x-auto">
+    <p v-if="rows.length > 0" class="mb-2 text-sm text-gray-500">
+      Showing {{ filteredSortedRows.length }} of {{ rows.length }} row(s)
+    </p>
     <table v-if="rows.length > 0" class="w-full border-collapse bg-white text-xs">
       <thead>
         <tr>
-          <th
+          <TableHeaderCell
             v-for="col in columns"
             :key="col"
-            class="relative sticky top-0 z-10 whitespace-nowrap border border-gray-200 bg-gray-100 px-2.5 py-2 text-left"
-          >
-            <span>{{ col }}</span>
-            <span v-if="sortCol === col">{{ sortDir === "asc" ? " ▲" : " ▼" }}</span>
-            <button
-              type="button"
-              class="ml-1 rounded px-1.5 text-xs"
-              :class="isFiltered(col) ? 'text-blue-500 font-bold' : 'text-gray-500 hover:bg-gray-200'"
-              @click.stop="toggleDropdown(col)"
-            >
-              &#9662;
-            </button>
-
-            <FilterDropdown
-              v-if="openCol === col"
-              :column="col"
-              :unique-values="getUniqueValues(col)"
-              :selected-values="Array.from(getUniqueValues(col))"
-              @apply="(values) => handleApply(col, values)"
-              @clear="handleClear(col)"
-              @sort="(dir) => handleSort(col, dir)"
-            />
-          </th>
+            :column="col"
+            :unique-values="getUniqueValues(col)"
+            :selected-values="Array.from(getUniqueValues(col))"
+            :is-filtered="isFiltered(col)"
+            :is-sorted="sortCol === col"
+            :sort-dir="sortDir"
+            :is-open="openCol === col"
+            @toggle="toggleDropdown(col)"
+            @apply="(values: string[]) => handleApply(col, values)"
+            @clear="handleClear(col)"
+            @sort="(dir: 'asc' | 'desc') => handleSort(col, dir)"
+          />
         </tr>
       </thead>
       <tbody>

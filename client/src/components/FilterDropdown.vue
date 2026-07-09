@@ -24,7 +24,7 @@ function displayVal(v: string): string {
 const visibleValues = computed(() => {
   const term = searchTerm.value.toLowerCase();
   if (!term) return props.uniqueValues;
-  return props.uniqueValues.filter((v) => displayVal(v).toLowerCase().includes(term));
+  return props.uniqueValues.filter((v: string) => displayVal(v).toLowerCase().includes(term));
 });
 
 const allChecked = computed(() => checked.value.size === props.uniqueValues.length);

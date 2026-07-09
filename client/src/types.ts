@@ -44,3 +44,26 @@ export interface ApiErrorBody {
   error: string;
   detail?: string;
 }
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface AskAnswer {
+  status: "answered";
+  question: string;
+  sql: string;
+  summary: string;
+  rows: Record<string, unknown>[];
+  usage?: TokenUsage;
+}
+
+export interface AskClarification {
+  status: "needs_clarification";
+  message: string;
+  usage?: TokenUsage;
+}
+
+export type AskResult = AskAnswer | AskClarification;
