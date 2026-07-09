@@ -1,14 +1,17 @@
 /**
  * server.ts
  *
- * Minimal web app for testing the upload/parse pipeline:
- *   - GET  /                serves the upload homepage
- *   - GET  /database.html   serves the data browser page
+ * Web app for testing the upload/parse pipeline:
+ *   - GET  /                serves the upload homepage (built Vue app, from client-dist/)
+ *   - GET  /database.html   serves the data browser page (built Vue app, from client-dist/)
  *   - GET  /api/config      returns the API key so the frontend can auth itself (local/testing convenience)
  *   - POST /api/upload      accepts an .xlsx file, parses it, inserts into the database
  *   - GET  /api/vehicles    returns every row currently in `vehicles`
  *
- * Run with: npx ts-node server.ts
+ * The frontend lives in client/ (Vue 3 + TypeScript + Tailwind, built with Vite).
+ * Run `npm run build` once to produce client-dist/, then `npm start` to run this server.
+ * For frontend development with hot reload, use `npm run dev:client` alongside `npm run dev:server`.
+ *
  * Requires DATABASE_URL and API_KEY in .env.
  */
 
@@ -67,7 +70,7 @@ app.get("/api/vehicles", requireApiKey, async (_req: Request, res: Response) => 
   }
 });
 
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static(path.join(__dirname, "client-dist")));
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
