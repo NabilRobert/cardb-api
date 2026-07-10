@@ -1,19 +1,22 @@
 /**
  * routes/ask.ts
  *
- * GET /api/ask - answers a natural-language question about stock (see ai.ts).
+ * POST /api/ask - answers a natural-language question about stock (see ai.ts).
+ * Expects multipart/form-data with a "question" field.
  */
 
 import { Router, Request, Response } from "express";
+import multer from "multer";
 import { askQuestion } from "../ai";
 import { requireApiKey } from "../middleware/apiKey";
 
+const upload = multer();
 const router = Router();
 
-router.get("/", requireApiKey, async (req: Request, res: Response) => {
-  const question = typeof req.query.question === "string" ? req.query.question.trim() : "";
+router.post("/", requireApiKey, upload.none(), async (req: Request, res: Response) => {
+  const question = typeof req.body.question === "string" ? req.body.question.trim() : "";
   if (!question) {
-    return res.status(400).json({ error: "Missing 'question' query parameter" });
+    return res.status(400).json({ error: "Missing 'question' form field" });
   }
   try {
     const result = await askQuestion(question);

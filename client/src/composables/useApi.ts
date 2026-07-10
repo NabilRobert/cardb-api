@@ -52,7 +52,9 @@ export async function fetchVehicles(): Promise<Vehicle[]> {
 
 export async function askQuestion(question: string): Promise<AskResult> {
   const headers = await authHeaders();
-  const res = await fetch(`/api/ask?question=${encodeURIComponent(question)}`, { headers });
+  const formData = new FormData();
+  formData.append("question", question);
+  const res = await fetch("/api/ask", { method: "POST", headers, body: formData });
   const data = await res.json();
 
   if (!res.ok) {

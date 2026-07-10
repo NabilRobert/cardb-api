@@ -2,7 +2,9 @@
 CREATE TABLE IF NOT EXISTS uploads (
     id SERIAL PRIMARY KEY,
     filename TEXT NOT NULL,
-    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    rows_inserted INTEGER,      -- populated at insert time; NULL for uploads that predate this column
+    rows_skipped INTEGER
 );
 
 -- vehicles: current snapshot, one row per physical unit

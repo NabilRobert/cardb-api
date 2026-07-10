@@ -1,8 +1,9 @@
 /**
  * middleware/apiKey.ts
  *
- * Guards every /api/* route except /api/config, which requires the API key
- * in an X-API-Key header.
+ * Requires the API key in an X-API-Key header. Applied to every /api/* route
+ * except /api/config and /api/health, which are intentionally reachable
+ * without a key.
  */
 
 import { Request, Response, NextFunction } from "express";

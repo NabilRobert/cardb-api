@@ -22,7 +22,7 @@ router.post("/", requireApiKey, upload.single("file"), async (req: Request, res:
   try {
     const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
     const { rows, skipped } = parseWorkbook(wb);
-    const { uploadId, inserted } = await insertVehicles(req.file.originalname, rows);
+    const { uploadId, inserted } = await insertVehicles(req.file.originalname, rows, skipped.length);
     res.json({ uploadId, inserted, skipped });
   } catch (err: any) {
     console.error(err);
