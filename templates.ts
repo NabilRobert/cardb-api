@@ -188,6 +188,27 @@ export function buildPreviewRows(ws: XLSX.WorkSheet, headerCells: HeaderCell[], 
   return rows;
 }
 
+/**
+ * Raw (column-letter-keyed) cell values for an exact, already-known set of
+ * sheet row numbers -- e.g. the row_index of every row extractRowsWithMapping
+ * successfully parsed. Unlike buildPreviewRows, this doesn't scan for or
+ * skip anything: the caller already decided which rows matter, so this just
+ * reads them. Used so a "preview" response's rawPreview and parsedPreview
+ * stay in exact 1:1 correspondence (same rows, same order, same count) --
+ * scanning independently (as buildPreviewRows does) could disagree with
+ * extractRowsWithMapping's own row-inclusion rules (e.g. a #REF! error row
+ * that extractRowsWithMapping sends to `skipped` rather than `rows`).
+ */
+export function buildRawRowsForIndices(ws: XLSX.WorkSheet, headerCells: HeaderCell[], rowIndices: number[]): Record<string, unknown>[] {
+  return rowIndices.map((r) => {
+    const row: Record<string, unknown> = { _row: r };
+    for (const { col } of headerCells) {
+      row[col] = getCell(ws, col, r).value;
+    }
+    return row;
+  });
+}
+
 export interface FlaggedRow {
   sheet: string;
   row: number;

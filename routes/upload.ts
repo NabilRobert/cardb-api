@@ -25,10 +25,11 @@
  *     (see ai.ts); if it can't confidently identify license_plate/brand,
  *     responds with needs_clarification instead of guessing.
  * Either way, if a mapping is available (stored or proposed), this parses
- * the sheet with it and returns a preview -- row count, a sample of raw
- * cell values, a sample of fully parsed rows, anything skipped/flagged --
- * WITHOUT inserting anything. A known format now gets exactly the same
- * preview-before-commit treatment an unrecognized one already required.
+ * the sheet with it and returns a preview -- row count, every raw cell
+ * row and every parsed row (up to MAX_PREVIEW_ROWS, see below),
+ * anything skipped/flagged -- WITHOUT inserting anything. A known format
+ * now gets exactly the same preview-before-commit treatment an
+ * unrecognized one already required.
  *
  * STEP 3 -- POST /api/upload/confirm-mapping
  * Takes the file again plus sheet_name and the (possibly human-edited)
@@ -52,10 +53,20 @@ import {
   extractHeaderCellsAtRow,
   computeHeaderFingerprint,
   buildPreviewRows,
+  buildRawRowsForIndices,
   extractRowsWithMapping,
   getSheetSummaries,
   ColumnMapping,
 } from "../templates";
+
+// Safety cap on the preview response's rawPreview/parsedPreview arrays --
+// distinct from the "always 10" sample this replaces. Real sheets in this
+// system run to the low hundreds of rows at most; this is deliberately far
+// above that (a genuine few-thousand-row sheet is already an outlier) so it
+// only ever bites on a truly pathological file, not normal usage. rowCount
+// always reflects the true total; `truncated` tells the caller if the
+// arrays were capped short of it.
+const MAX_PREVIEW_ROWS = 5000;
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
@@ -154,6 +165,13 @@ router.post(
 
       const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName);
 
+      const truncated = rows.length > MAX_PREVIEW_ROWS;
+      const parsedPreview = truncated ? rows.slice(0, MAX_PREVIEW_ROWS) : rows;
+      // Built from parsedPreview's own row_index values (not scanned
+      // independently) so rawPreview and parsedPreview are guaranteed to
+      // cover exactly the same rows, in the same order.
+      const rawPreview = buildRawRowsForIndices(ws, headerCells, parsedPreview.map((r) => r.row_index));
+
       res.json({
         status: "preview",
         sheet: sheetName,
@@ -161,8 +179,9 @@ router.post(
         headerRow: headerCells,
         mapping,
         rowCount: rows.length,
-        rawPreview: buildPreviewRows(ws, headerCells, dataStartRow, 10),
-        parsedPreview: rows.slice(0, 10),
+        rawPreview,
+        parsedPreview,
+        truncated,
         skipped,
         flagged,
         ...(usage ? { usage } : {}),
