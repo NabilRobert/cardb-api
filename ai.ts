@@ -1,23 +1,31 @@
 /**
  * ai.ts
  *
- * Turns a natural-language question into a single read-only SQL query via
- * SumoPod (OpenAI-compatible endpoint, gpt-5-mini), runs it against Postgres,
- * and formats a templated answer.
+ * Two SumoPod-backed features (OpenAI-compatible endpoint, gpt-5-mini), both
+ * built on the same one-call design:
+ *   - askQuestion(): turns a natural-language question into a single
+ *     read-only SQL query, runs it against Postgres, and formats a
+ *     templated answer. Powers POST /api/ask.
+ *   - proposeColumnMapping(): given an unrecognized sheet's header row (see
+ *     templates.ts), proposes which column holds which vehicle field.
+ *     Powers the needs_mapping_review path of POST /api/upload.
  *
- * Token-saving design choices (this is the main lever for keeping cost low):
- *   - Exactly ONE AI call per question (the text-to-SQL step). The answer
- *     itself is formatted in plain code afterward, not a second AI call.
- *   - The system prompt is a short schema description, not the actual data --
- *     the model never sees your rows, only column names/types.
- *   - temperature 0 and a low max_tokens cap, since SQL output is short and
- *     doesn't benefit from "creativity" (also makes output more reliable).
+ * Token-saving design choices (the main lever for keeping cost low):
+ *   - Exactly ONE AI call per question / per unrecognized sheet. Any
+ *     further formatting/parsing happens in plain code afterward, not a
+ *     second AI call.
+ *   - The system prompts are short schema/field descriptions, not the
+ *     actual data -- the model never sees your full rows, only column
+ *     names/types (or, for mapping, the header row + a few sample rows).
+ *   - temperature 0 and a low max_tokens cap, since both outputs are short
+ *     and don't benefit from "creativity" (also makes output more reliable).
  *   - Actual token usage from SumoPod's response is passed straight back to
- *     the frontend so you can see exactly what each question costs.
+ *     the caller so you can see exactly what each call costs.
  */
 
 import { pool } from "./db";
 import { KNOWN_AREAS } from "./parser";
+import { MAPPABLE_FIELDS, MappableField, HeaderCell } from "./templates";
 
 const SUMOPOD_URL = "https://ai.sumopod.com/v1/chat/completions";
 const MODEL = "gpt-5-mini";
@@ -74,7 +82,12 @@ export interface AskClarification {
   usage?: TokenUsage;
 }
 
-async function callSumoPod(question: string): Promise<{ text: string; usage?: TokenUsage }> {
+/**
+ * Low-level SumoPod chat call shared by every AI feature in this file (text-
+ * to-SQL, column-mapping proposal, ...) so the request shape / reasoning
+ * settings / error handling only live in one place.
+ */
+async function chatCompletion(systemPrompt: string, userContent: string): Promise<{ text: string; usage?: TokenUsage }> {
   if (!process.env.SUMOPOD_API_KEY) {
     throw new Error("SUMOPOD_API_KEY is not set");
   }
@@ -92,13 +105,14 @@ async function callSumoPod(question: string): Promise<{ text: string; usage?: To
       // writing the visible answer. Reasoning models require
       // max_completion_tokens (max_tokens is the legacy, non-reasoning param
       // and can leave `content` empty here). reasoning_effort is kept low
-      // since text-to-SQL for one table doesn't need deep reasoning, and the
-      // budget is generous enough to survive reasoning + a full SELECT.
+      // since neither text-to-SQL for one table nor column-mapping from a
+      // header row needs deep reasoning, and the budget is generous enough
+      // to survive reasoning + a full response either way.
       max_completion_tokens: 1000,
       reasoning_effort: "minimal",
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: question },
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
       ],
     }),
   });
@@ -111,6 +125,10 @@ async function callSumoPod(question: string): Promise<{ text: string; usage?: To
   const data = (await res.json()) as SumoPodResponse;
   const text = data.choices?.[0]?.message?.content?.trim() ?? "";
   return { text, usage: data.usage };
+}
+
+async function callSumoPod(question: string): Promise<{ text: string; usage?: TokenUsage }> {
+  return chatCompletion(SYSTEM_PROMPT, question);
 }
 
 const FORBIDDEN = /\b(INSERT|UPDATE|DELETE|DROP|ALTER|TRUNCATE|GRANT|REVOKE|CREATE)\b/i;
@@ -270,4 +288,93 @@ export async function askQuestion(question: string): Promise<AskAnswer | AskClar
     rows,
     usage,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Column-mapping proposal for unrecognized import formats (see templates.ts
+// and routes/upload.ts). Same one-call, no-second-guessing design as
+// askQuestion above: one cheap SumoPod call per unrecognized sheet, never
+// one call per row.
+// ---------------------------------------------------------------------------
+
+const MAPPING_SYSTEM_PROMPT = `You are mapping columns from a source spreadsheet to a fixed vehicle-inventory schema.
+
+Target fields you may map (each to a column letter, e.g. "B" or "AC"). Only include a field if the header labels (or sample data) clearly identify it -- do not guess wildly:
+${MAPPABLE_FIELDS.join(", ")}
+
+You will be given the header row (column letter: label) and a few sample data rows below it (column letter=value).
+
+Respond with ONLY a JSON object of the shape {"columns": {"<field>": "<COLUMN_LETTER>", ...}} -- no markdown, no explanation, no other text. Each column letter must be used for at most one field -- never map two different fields to the same column.
+
+license_plate and brand are required. If you cannot confidently identify both of those columns from the headers, respond with exactly: CLARIFY: <a short reason>`;
+
+export interface MappingProposal {
+  status: "proposed";
+  columns: Partial<Record<MappableField, string>>;
+  usage?: TokenUsage;
+}
+
+export interface MappingClarification {
+  status: "needs_clarification";
+  message: string;
+  usage?: TokenUsage;
+}
+
+const MAPPABLE_FIELD_SET: ReadonlySet<string> = new Set(MAPPABLE_FIELDS);
+const COLUMN_LETTER_RE = /^[A-Za-z]{1,3}$/;
+
+export async function proposeColumnMapping(
+  headerCells: HeaderCell[],
+  sampleRows: Record<string, unknown>[]
+): Promise<MappingProposal | MappingClarification> {
+  const headerDesc = headerCells.map((h) => `${h.col}: ${h.value}`).join("\n");
+  const sampleDesc = sampleRows
+    .map((row, i) => `Row ${i + 1}: ` + Object.entries(row).map(([col, v]) => `${col}=${v}`).join(", "))
+    .join("\n");
+  const userContent = `Header row:\n${headerDesc}\n\nSample data rows:\n${sampleDesc || "(no data rows found)"}`;
+
+  const { text, usage } = await chatCompletion(MAPPING_SYSTEM_PROMPT, userContent);
+  console.log("[mapping] raw model response:", text);
+
+  if (text.toUpperCase().startsWith("CLARIFY:")) {
+    return { status: "needs_clarification", message: text.slice(text.indexOf(":") + 1).trim(), usage };
+  }
+
+  const cleaned = text.replace(/```(?:json)?/gi, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) {
+    return { status: "needs_clarification", message: "Could not parse a column mapping from the model's response.", usage };
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    return { status: "needs_clarification", message: "Model returned malformed JSON for the column mapping.", usage };
+  }
+
+  const rawColumns = parsed?.columns;
+  if (!rawColumns || typeof rawColumns !== "object") {
+    return { status: "needs_clarification", message: "Model's response didn't include a 'columns' mapping.", usage };
+  }
+
+  // Only keep known fields with plausible, not-yet-claimed column-letter
+  // values -- ignore anything else the model invented, and drop a field
+  // outright rather than let it silently overwrite an earlier one sharing
+  // the same column (the prompt asks for 1:1, but don't rely on it alone).
+  const columns: Partial<Record<MappableField, string>> = {};
+  const usedColumns = new Set<string>();
+  for (const [field, col] of Object.entries(rawColumns)) {
+    if (!MAPPABLE_FIELD_SET.has(field) || typeof col !== "string" || !COLUMN_LETTER_RE.test(col)) continue;
+    const upper = col.toUpperCase();
+    if (usedColumns.has(upper)) continue;
+    columns[field as MappableField] = upper;
+    usedColumns.add(upper);
+  }
+
+  if (!columns.license_plate || !columns.brand) {
+    return { status: "needs_clarification", message: "Could not confidently identify both license_plate and brand columns from the headers.", usage };
+  }
+
+  return { status: "proposed", columns, usage };
 }

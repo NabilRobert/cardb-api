@@ -8,6 +8,7 @@
 import { Pool } from "pg";
 import * as dotenv from "dotenv";
 import { VehicleRow } from "./parser";
+import { ColumnMapping } from "./templates";
 
 dotenv.config();
 
@@ -220,6 +221,33 @@ export async function getUploads({ limit, offset }: { limit: number; offset: num
     [limit, offset]
   );
   return result.rows;
+}
+
+export interface ImportTemplate {
+  id: number;
+  header_fingerprint: string;
+  sheet_label: string;
+  column_mapping: ColumnMapping;
+  created_at: Date;
+}
+
+export async function findTemplateByFingerprint(fingerprint: string): Promise<ImportTemplate | null> {
+  const result = await pool.query("SELECT * FROM import_templates WHERE header_fingerprint = $1", [fingerprint]);
+  return result.rows[0] ?? null;
+}
+
+// Upserts on header_fingerprint -- confirming a mapping for a format that's
+// already known (e.g. re-confirming with an edit) updates it in place rather
+// than erroring or creating a duplicate row.
+export async function saveImportTemplate(fingerprint: string, sheetLabel: string, mapping: ColumnMapping): Promise<ImportTemplate> {
+  const result = await pool.query(
+    `INSERT INTO import_templates (header_fingerprint, sheet_label, column_mapping)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (header_fingerprint) DO UPDATE SET sheet_label = EXCLUDED.sheet_label, column_mapping = EXCLUDED.column_mapping
+     RETURNING *`,
+    [fingerprint, sheetLabel, JSON.stringify(mapping)]
+  );
+  return result.rows[0];
 }
 
 export async function checkDbConnection(): Promise<boolean> {

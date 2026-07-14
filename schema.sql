@@ -59,3 +59,17 @@ CREATE TABLE IF NOT EXISTS vehicle_transactions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_vehicle_transactions_vehicle_id ON vehicle_transactions (vehicle_id);
+
+-- import_templates: known header-row shapes and how to map their columns to
+-- the vehicles table, so POST /api/upload can recognize a previously-seen
+-- format without re-asking the AI. header_fingerprint is a hash of the
+-- normalized header row (see templates.ts); column_mapping is a JSON object
+-- of { headerRow, dataStartRow, columns: { <vehicle field>: <column letter> },
+-- locationDefault?, statusDefault? }.
+CREATE TABLE IF NOT EXISTS import_templates (
+    id SERIAL PRIMARY KEY,
+    header_fingerprint TEXT NOT NULL UNIQUE,
+    sheet_label TEXT NOT NULL,
+    column_mapping JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
