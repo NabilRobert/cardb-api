@@ -35,7 +35,10 @@
  * mapping from step 2. Saves the mapping into import_templates (harmless
  * no-op re-save if it was already a registry hit; for a freshly-proposed
  * mapping this is what makes the format recognized from now on), then
- * parses and inserts for real.
+ * parses and inserts for real. Optional excludeRows (JSON array of sheet
+ * row numbers, same numbers the step-2 preview handed back under `_row`/
+ * `row_index`) drops specific rows before parsing -- they show up in the
+ * response's skipped array with reason "excluded by user".
  */
 
 import { Router, Request, Response, NextFunction } from "express";
@@ -200,6 +203,24 @@ router.post(
       return res.status(400).json({ error: "mapping.columns must include at least license_plate and brand" });
     }
 
+    // Optional: sheet row numbers (matching _row/row_index from the preview
+    // step) to drop before parsing, on top of whatever price-sanity/error
+    // isolation already skips -- e.g. rows a human flagged as garbage while
+    // reviewing the preview.
+    let excludeRows: Set<number> | undefined;
+    if (typeof req.body.excludeRows === "string" && req.body.excludeRows.trim()) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(req.body.excludeRows);
+      } catch {
+        return res.status(400).json({ error: "'excludeRows' form field must be valid JSON" });
+      }
+      if (!Array.isArray(parsed) || !parsed.every((n) => typeof n === "number")) {
+        return res.status(400).json({ error: "'excludeRows' must be a JSON array of row numbers" });
+      }
+      excludeRows = new Set(parsed);
+    }
+
     const sheetLabel = typeof req.body.sheet_label === "string" && req.body.sheet_label.trim() ? req.body.sheet_label.trim() : sheetName;
 
     try {
@@ -217,7 +238,7 @@ router.post(
 
       await saveImportTemplate(fingerprint, sheetLabel, mapping);
 
-      const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName);
+      const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName, excludeRows);
       const { uploadId, inserted } = await insertVehicles(req.file.originalname, rows, skipped.length);
 
       res.json({ uploadId, inserted, skipped, flagged, templateSaved: true });

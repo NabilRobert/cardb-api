@@ -163,12 +163,19 @@ export function computeHeaderFingerprint(headerCells: HeaderCell[]): string {
  * a line further down. The scan itself is still bounded, so a sheet that's
  * genuinely empty (or has a huge declared range with no real data) can't
  * turn this into an unbounded walk.
+ *
+ * Each row carries its actual sheet row number under `_row` -- a leading
+ * underscore so it can never collide with a real column letter -- so a
+ * caller (e.g. a "remove this row" UI) can reference a specific row back
+ * to routes/upload.ts's confirm-mapping excludeRows. (extractRowsWithMapping's
+ * VehicleRow-shaped output already exposes the same number as `row_index`,
+ * the existing field name used everywhere else in this codebase.)
  */
 export function buildPreviewRows(ws: XLSX.WorkSheet, headerCells: HeaderCell[], dataStartRow: number, maxRows: number): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
   const scanLimit = dataStartRow + Math.max(maxRows * 20, 50);
   for (let r = dataStartRow; r < scanLimit && rows.length < maxRows; r++) {
-    const row: Record<string, unknown> = {};
+    const row: Record<string, unknown> = { _row: r };
     let hasValue = false;
     for (const { col } of headerCells) {
       const { value } = getCell(ws, col, r);
@@ -222,11 +229,18 @@ const MAX_DATA_ROWS = 20_000;
  * column_mapping. This is the one shared extraction path for both a
  * registry hit and a human-confirmed AI proposal -- so the price sanity
  * check below applies regardless of where the mapping came from.
+ *
+ * excludeRows (sheet row numbers, matching the `_row`/`row_index` a preview
+ * step already handed back to the caller) lets a human drop specific rows
+ * before they're ever parsed -- e.g. rows they've visually identified as
+ * garbage in the preview. Excluded rows land in `skipped` just like any
+ * other skip reason, so the final counts stay honest.
  */
 export function extractRowsWithMapping(
   ws: XLSX.WorkSheet,
   mapping: ColumnMapping,
-  sheetName: string
+  sheetName: string,
+  excludeRows?: ReadonlySet<number>
 ): { rows: VehicleRow[]; skipped: SkippedRow[]; flagged: FlaggedRow[] } {
   const rows: VehicleRow[] = [];
   const skipped: SkippedRow[] = [];
@@ -239,6 +253,10 @@ export function extractRowsWithMapping(
   const get = (field: MappableField, r: number) => (cols[field] ? getCell(ws, cols[field]!, r) : { value: null, isError: false });
 
   for (let r = mapping.dataStartRow; r <= lastRow; r++) {
+    if (excludeRows?.has(r)) {
+      skipped.push({ sheet: sheetName, row: r, reason: "excluded by user" });
+      continue;
+    }
     // A single malformed row (unexpected cell shape, a helper throwing on
     // something it wasn't defended against) must never abort the whole
     // sheet -- catch it, record the real reason, and keep going.
