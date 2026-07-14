@@ -6,7 +6,9 @@
  * CORS_ORIGIN below) -- this process serves no frontend assets of its own.
  *   - GET  /api/config      returns the API key so the frontend can auth itself (local/testing convenience)
  *   - GET  /api/health      liveness + DB connectivity check (no auth)
- *   - POST /api/upload      accepts an .xlsx file, parses it, inserts into the database
+ *   - POST /api/upload                    step 1 of 3: list a workbook's sheets, nothing processed yet
+ *   - POST /api/upload/process-sheet      step 2 of 3: parse a chosen sheet, return a preview, nothing inserted yet
+ *   - POST /api/upload/confirm-mapping    step 3 of 3: commit -- save the mapping and insert
  *   - GET  /api/uploads     upload history, paginated
  *   - GET  /api/vehicles    returns every row currently in `vehicles`
  *   - GET  /api/vehicles/search   filtered/sorted/paginated search
@@ -33,6 +35,33 @@ app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
 app.use(express.json());
 
 app.use("/api", apiRouter);
+
+// Top-level error boundary: catches anything that reaches next(err) --
+// multer errors (oversized file, wrong field name), or an error passed on
+// from a route via asyncRoute (see routes/upload.ts) that wasn't already
+// turned into a response by that route's own try/catch. Registered after
+// all routes, as Express requires for error-handling middleware. Without
+// this, Express's own default handler would respond with an HTML stack
+// trace instead of the JSON shape every other error response here uses.
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(err);
+  if (res.headersSent) return;
+  res.status(500).json({ error: "Unexpected server error", detail: err?.message ?? String(err) });
+});
+
+// Last-resort safety net: a bug that slips past every try/catch and error
+// middleware above (e.g. a rejected promise nothing ever awaited, so it
+// isn't wired to any request/response at all) would otherwise crash the
+// whole process by default in modern Node -- taking down every in-flight
+// request, not just the one that triggered it. Log and keep running instead;
+// whatever request caused this may still fail, but the server as a whole
+// stays up for everyone else.
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled promise rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+});
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);

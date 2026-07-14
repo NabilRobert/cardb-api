@@ -16,8 +16,9 @@
  *     price_min / price_max              -> price_cash
  *     price_credit_min / price_credit_max -> price_credit
  *   Date ranges (before = <=, after = >=):
- *     stnk_expiry_before / stnk_expiry_after   -> stnk_expiry_date
- *     stock_entry_before / stock_entry_after   -> stock_entry_date
+ *     stnk_expiry_before / stnk_expiry_after       -> stnk_expiry_date
+ *     purchase_date_before / purchase_date_after   -> purchase_date
+ *     handover_date_before / handover_date_after   -> handover_date
  *   Free text (OR across brand, model_trim, notes_raw):
  *     q
  *   Sorting:

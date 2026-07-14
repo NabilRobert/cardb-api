@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS vehicles (
     color TEXT,
     odometer_km INTEGER,
     stnk_expiry_date DATE,
-    stock_entry_date DATE,     -- date the unit entered stock (derived from "Age" column)
+    purchase_date DATE,        -- date the unit was purchased/entered stock (derived from "Age" column on hardcoded formats, or mapped directly from a "Purchase Date" column via the template registry)
+    handover_date DATE,        -- date the vehicle was handed over to the buyer; source files usually just label this column "HANDOVER"
     status TEXT,               -- available / booked / sold
     reserved_by TEXT,          -- populated when status = booked
     location TEXT,             -- best-effort parsed area/branch, nullable
@@ -41,7 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_vehicles_brand ON vehicles (brand);
 CREATE INDEX IF NOT EXISTS idx_vehicles_status ON vehicles (status);
 CREATE INDEX IF NOT EXISTS idx_vehicles_location ON vehicles (location);
 CREATE INDEX IF NOT EXISTS idx_vehicles_license_plate ON vehicles (license_plate);
-CREATE INDEX IF NOT EXISTS idx_vehicles_stock_entry_date ON vehicles (stock_entry_date);
+CREATE INDEX IF NOT EXISTS idx_vehicles_purchase_date ON vehicles (purchase_date);
 
 -- vehicle_transactions: history log per unit (purchase / sale / recon events)
 CREATE TABLE IF NOT EXISTS vehicle_transactions (

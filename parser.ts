@@ -11,7 +11,7 @@
  *   - "Harga CASH" == 0 means "not offered for cash", not free -> stored as NULL
  *   - rows broken by Excel #REF! errors are skipped and reported, not inserted
  *   - Indonesian date strings ("20 Maret 2027") are parsed into real dates
- *   - "Age" (days in stock) + the report date in cell A2 -> stock_entry_date
+ *   - "Age" (days in stock) + the report date in cell A2 -> purchase_date
  */
 
 import * as XLSX from "xlsx";
@@ -94,14 +94,14 @@ export function cleanPlate(raw: unknown): string | null {
 }
 
 /**
- * The sheet doesn't have a direct "date entered stock" column, but it does
- * have "Age" (days in stock) next to a report date in cell A2 (e.g. "Harga
- * hanya berlaku untuk hari ini" = prices valid as of this date). Verified
- * against the "Daily Report Updated" sheet, which has both a real purchase
- * date and an Age column side by side: report_date - purchase_date == Age,
- * exactly, in whole days. So: stock_entry_date = report_date - Age days.
+ * The Pricelist sheet doesn't have a direct "Purchase Date" column, but it
+ * does have "Age" (days in stock) next to a report date in cell A2 (e.g.
+ * "Harga hanya berlaku untuk hari ini" = prices valid as of this date).
+ * Verified against the "Daily Report Updated" sheet, which has both a real
+ * purchase date and an Age column side by side: report_date - purchase_date
+ * == Age, exactly, in whole days. So: purchase_date = report_date - Age days.
  */
-export function deriveStockEntryDate(reportDate: Date | null, age: unknown): Date | null {
+export function derivePurchaseDate(reportDate: Date | null, age: unknown): Date | null {
   if (!reportDate || typeof age !== "number" || isNaN(age)) return null;
   const d = new Date(reportDate);
   d.setDate(d.getDate() - age);
@@ -122,6 +122,17 @@ export function getCell(ws: XLSX.WorkSheet, col: string, row: number) {
   return { value: cell.v, isError: false };
 }
 
+// A sheet's declared row range (like its column range) can be inflated by
+// leftover formatting bleed rather than real data -- decode_range on a
+// missing !ref would also throw outright. Guard both: fall back to an empty
+// range if !ref is absent, and cap how many rows a loader will ever walk.
+const MAX_ROW_SCAN = 20_000;
+
+function safeDecodeRange(ws: XLSX.WorkSheet): { s: { r: number; c: number }; e: { r: number; c: number } } {
+  const ref = ws["!ref"] as string | undefined;
+  return ref ? XLSX.utils.decode_range(ref) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+}
+
 export interface VehicleRow {
   license_plate: string | null;
   vin: string | null;
@@ -133,7 +144,8 @@ export interface VehicleRow {
   color: string | null;
   odometer_km: number | null;
   stnk_expiry_date: Date | null;
-  stock_entry_date: Date | null;
+  purchase_date: Date | null;
+  handover_date: Date | null;
   status: string | null;
   reserved_by: string | null;
   location: string | null;
@@ -172,59 +184,67 @@ export function loadPricelistSheet(ws: XLSX.WorkSheet): { rows: VehicleRow[]; sk
   const reportDateCell = getCell(ws, "A", 2);
   const reportDate = reportDateCell.value instanceof Date ? reportDateCell.value : null;
 
-  const range = XLSX.utils.decode_range(ws["!ref"] as string);
-  for (let r = 8; r <= range.e.r + 1; r++) {
-    const plate = getCell(ws, "B", r);
-    const merk = getCell(ws, "C", r);
-    const tipe = getCell(ws, "D", r);
-    const transmisi = getCell(ws, "E", r);
-    const tahun = getCell(ws, "F", r);
-    const warna = getCell(ws, "G", r);
-    const km = getCell(ws, "H", r);
-    const tglStnk = getCell(ws, "I", r);
-    const age = getCell(ws, "J", r);
-    const hargaCash = getCell(ws, "K", r);
-    const hargaKredit = getCell(ws, "L", r);
-    const maxDisc = getCell(ws, "M", r);
-    const kepemilikan = getCell(ws, "N", r);
-    const keterangan = getCell(ws, "O", r);
-    const posisiUnit = getCell(ws, "P", r);
+  const range = safeDecodeRange(ws);
+  const lastRow = Math.min(range.e.r + 1, 8 + MAX_ROW_SCAN);
+  for (let r = 8; r <= lastRow; r++) {
+    try {
+      const plate = getCell(ws, "B", r);
+      const merk = getCell(ws, "C", r);
+      const tipe = getCell(ws, "D", r);
+      const transmisi = getCell(ws, "E", r);
+      const tahun = getCell(ws, "F", r);
+      const warna = getCell(ws, "G", r);
+      const km = getCell(ws, "H", r);
+      const tglStnk = getCell(ws, "I", r);
+      const age = getCell(ws, "J", r);
+      const hargaCash = getCell(ws, "K", r);
+      const hargaKredit = getCell(ws, "L", r);
+      const maxDisc = getCell(ws, "M", r);
+      const kepemilikan = getCell(ws, "N", r);
+      const keterangan = getCell(ws, "O", r);
+      const posisiUnit = getCell(ws, "P", r);
 
-    if (plate.value === null && merk.value === null && !plate.isError && !merk.isError) {
-      continue; // blank spacer row
+      if (plate.value === null && merk.value === null && !plate.isError && !merk.isError) {
+        continue; // blank spacer row
+      }
+
+      if (plate.isError || merk.isError || tipe.isError || transmisi.isError || tahun.isError || warna.isError || km.isError || tglStnk.isError) {
+        skipped.push({ sheet: "Pricelist", row: r, reason: "#REF! error" });
+        continue;
+      }
+
+      const { status, reservedBy } = typeof posisiUnit.value === "string"
+        ? parseStatusAndReserved(posisiUnit.value)
+        : { status: null, reservedBy: null };
+
+      rows.push({
+        license_plate: cleanPlate(plate.value),
+        vin: null,
+        engine_no: null,
+        brand: normalizeBrand(merk.value),
+        model_trim: typeof tipe.value === "string" ? tipe.value.trim() : null,
+        year: typeof tahun.value === "number" ? tahun.value : null,
+        transmission: typeof transmisi.value === "string" ? transmisi.value : null,
+        color: typeof warna.value === "string" ? warna.value : null,
+        odometer_km: typeof km.value === "number" ? km.value : null,
+        stnk_expiry_date: parseIndonesianDate(tglStnk.value),
+        purchase_date: derivePurchaseDate(reportDate, age.isError ? null : age.value),
+        handover_date: null, // Pricelist has no handover-date column
+        status,
+        reserved_by: reservedBy,
+        location: "DSSM", // this sheet is the DSS Motor Bintaro master list
+        ownership: typeof kepemilikan.value === "string" ? kepemilikan.value : null,
+        price_cash: typeof hargaCash.value === "number" && hargaCash.value !== 0 ? hargaCash.value : null,
+        price_credit: typeof hargaKredit.value === "number" && hargaKredit.value !== 0 ? hargaKredit.value : null,
+        max_credit_discount: maxDisc.isError ? null : typeof maxDisc.value === "string" ? maxDisc.value : null,
+        notes_raw: typeof keterangan.value === "string" ? keterangan.value : null,
+        source: null,
+        sheet_name: "Pricelist",
+        row_index: r,
+      });
+    } catch (err: any) {
+      skipped.push({ sheet: "Pricelist", row: r, reason: err?.message ?? String(err) });
     }
-
-    if (plate.isError || merk.isError || tipe.isError || transmisi.isError || tahun.isError || warna.isError || km.isError || tglStnk.isError) {
-      skipped.push({ sheet: "Pricelist", row: r, reason: "#REF! error" });
-      continue;
-    }
-
-    const { status, reservedBy } = parseStatusAndReserved(posisiUnit.value as string);
-
-    rows.push({
-      license_plate: cleanPlate(plate.value),
-      vin: null,
-      engine_no: null,
-      brand: normalizeBrand(merk.value),
-      model_trim: typeof tipe.value === "string" ? tipe.value.trim() : (tipe.value as any),
-      year: typeof tahun.value === "number" ? tahun.value : null,
-      transmission: transmisi.value as string,
-      color: warna.value as string,
-      odometer_km: typeof km.value === "number" ? km.value : null,
-      stnk_expiry_date: parseIndonesianDate(tglStnk.value),
-      stock_entry_date: deriveStockEntryDate(reportDate, age.isError ? null : age.value),
-      status,
-      reserved_by: reservedBy,
-      location: "DSSM", // this sheet is the DSS Motor Bintaro master list
-      ownership: kepemilikan.value as string,
-      price_cash: hargaCash.value !== 0 && hargaCash.value !== null ? (hargaCash.value as number) : null,
-      price_credit: hargaKredit.value !== 0 && hargaKredit.value !== null ? (hargaKredit.value as number) : null,
-      max_credit_discount: maxDisc.isError ? null : (maxDisc.value as string),
-      notes_raw: typeof keterangan.value === "string" ? keterangan.value : null,
-      source: null,
-      sheet_name: "Pricelist",
-      row_index: r,
-    });
   }
 
   return { rows, skipped };
@@ -237,48 +257,55 @@ export function loadPricelistSheet(ws: XLSX.WorkSheet): { rows: VehicleRow[]; sk
  */
 export function loadSmrSheet(ws: XLSX.WorkSheet): { rows: VehicleRow[]; skipped: SkippedRow[] } {
   const rows: VehicleRow[] = [];
-  const range = XLSX.utils.decode_range(ws["!ref"] as string);
+  const skipped: SkippedRow[] = [];
+  const range = safeDecodeRange(ws);
+  const lastRow = Math.min(range.e.r + 1, 5 + MAX_ROW_SCAN);
 
-  for (let r = 5; r <= range.e.r + 1; r++) {
-    const plate = getCell(ws, "B", r);
-    const merk = getCell(ws, "C", r);
-    const tipe = getCell(ws, "D", r);
-    const transmisi = getCell(ws, "E", r);
-    const tahun = getCell(ws, "F", r);
-    const warna = getCell(ws, "G", r);
-    const km = getCell(ws, "H", r);
-    const grade = getCell(ws, "I", r);
-    const notes = getCell(ws, "J", r);
+  for (let r = 5; r <= lastRow; r++) {
+    try {
+      const plate = getCell(ws, "B", r);
+      const merk = getCell(ws, "C", r);
+      const tipe = getCell(ws, "D", r);
+      const transmisi = getCell(ws, "E", r);
+      const tahun = getCell(ws, "F", r);
+      const warna = getCell(ws, "G", r);
+      const km = getCell(ws, "H", r);
+      const grade = getCell(ws, "I", r);
+      const notes = getCell(ws, "J", r);
 
-    if (plate.value === null && merk.value === null) continue;
+      if (plate.value === null && merk.value === null) continue;
 
-    rows.push({
-      license_plate: cleanPlate(plate.value),
-      vin: null,
-      engine_no: null,
-      brand: normalizeBrand(merk.value),
-      model_trim: typeof tipe.value === "string" ? tipe.value.trim() : (tipe.value as any),
-      year: typeof tahun.value === "number" ? tahun.value : null,
-      transmission: transmisi.value as string,
-      color: warna.value as string,
-      odometer_km: typeof km.value === "number" ? km.value : null,
-      stnk_expiry_date: null,
-      stock_entry_date: null, // SMR sheet has no age/purchase-date info to derive this from
-      status: "available",
-      reserved_by: null,
-      location: "SMR",
-      ownership: null,
-      price_cash: null,
-      price_credit: null,
-      max_credit_discount: null,
-      notes_raw: (typeof notes.value === "string" ? notes.value : (grade.value as string)) ?? null,
-      source: null,
-      sheet_name: "SMR",
-      row_index: r,
-    });
+      rows.push({
+        license_plate: cleanPlate(plate.value),
+        vin: null,
+        engine_no: null,
+        brand: normalizeBrand(merk.value),
+        model_trim: typeof tipe.value === "string" ? tipe.value.trim() : null,
+        year: typeof tahun.value === "number" ? tahun.value : null,
+        transmission: typeof transmisi.value === "string" ? transmisi.value : null,
+        color: typeof warna.value === "string" ? warna.value : null,
+        odometer_km: typeof km.value === "number" ? km.value : null,
+        stnk_expiry_date: null,
+        purchase_date: null, // SMR sheet has no age/purchase-date info to derive this from
+        handover_date: null,
+        status: "available",
+        reserved_by: null,
+        location: "SMR",
+        ownership: null,
+        price_cash: null,
+        price_credit: null,
+        max_credit_discount: null,
+        notes_raw: (typeof notes.value === "string" ? notes.value : typeof grade.value === "string" ? grade.value : null),
+        source: null,
+        sheet_name: "SMR",
+        row_index: r,
+      });
+    } catch (err: any) {
+      skipped.push({ sheet: "SMR", row: r, reason: err?.message ?? String(err) });
+    }
   }
 
-  return { rows, skipped: [] };
+  return { rows, skipped };
 }
 
 export interface DailyReportRecord {
@@ -322,59 +349,68 @@ export interface DailyReportRecord {
  */
 export function loadDailyReportSheet(ws: XLSX.WorkSheet): { records: DailyReportRecord[] } {
   const records: DailyReportRecord[] = [];
-  const range = XLSX.utils.decode_range(ws["!ref"] as string);
+  const range = safeDecodeRange(ws);
+  const lastRow = Math.min(range.e.r + 1, 7 + MAX_ROW_SCAN);
 
-  for (let r = 7; r <= range.e.r + 1; r++) {
-    const appraiser = getCell(ws, "A", r);
-    const source = getCell(ws, "B", r);
-    const statusCell = getCell(ws, "D", r);
-    const plate = getCell(ws, "E", r);
-    const merk = getCell(ws, "F", r);
-    const tipe = getCell(ws, "G", r);
-    const transmisi = getCell(ws, "H", r);
-    const tahun = getCell(ws, "I", r);
-    const warna = getCell(ws, "J", r);
-    const km = getCell(ws, "K", r);
-    const tglStnk = getCell(ws, "L", r);
-    const noRangka = getCell(ws, "M", r);
-    const noMesin = getCell(ws, "N", r);
-    const tglBeli = getCell(ws, "O", r);
-    const hargaJualKredit = getCell(ws, "Q", r);
-    const hargaJualCash = getCell(ws, "R", r);
-    const hargaBeli = getCell(ws, "AC", r);
-    const totalActualRekondisi = getCell(ws, "AJ", r);
-    const prediksiGp = getCell(ws, "AQ", r);
-    const statusKepemilikan = getCell(ws, "AW", r);
+  for (let r = 7; r <= lastRow; r++) {
+    try {
+      const appraiser = getCell(ws, "A", r);
+      const source = getCell(ws, "B", r);
+      const statusCell = getCell(ws, "D", r);
+      const plate = getCell(ws, "E", r);
+      const merk = getCell(ws, "F", r);
+      const tipe = getCell(ws, "G", r);
+      const transmisi = getCell(ws, "H", r);
+      const tahun = getCell(ws, "I", r);
+      const warna = getCell(ws, "J", r);
+      const km = getCell(ws, "K", r);
+      const tglStnk = getCell(ws, "L", r);
+      const noRangka = getCell(ws, "M", r);
+      const noMesin = getCell(ws, "N", r);
+      const tglBeli = getCell(ws, "O", r);
+      const hargaJualKredit = getCell(ws, "Q", r);
+      const hargaJualCash = getCell(ws, "R", r);
+      const hargaBeli = getCell(ws, "AC", r);
+      const totalActualRekondisi = getCell(ws, "AJ", r);
+      const prediksiGp = getCell(ws, "AQ", r);
+      const statusKepemilikan = getCell(ws, "AW", r);
 
-    if (typeof plate.value !== "string" || !plate.value.trim()) continue;
-    if (plate.value.trim() === "Nomor Polisi") continue; // stray repeated header row
+      if (typeof plate.value !== "string" || !plate.value.trim()) continue;
+      if (plate.value.trim() === "Nomor Polisi") continue; // stray repeated header row
 
-    const { status, reservedBy } = parseStatusAndReserved(statusCell.value as string);
+      const { status, reservedBy } = typeof statusCell.value === "string"
+        ? parseStatusAndReserved(statusCell.value)
+        : { status: null, reservedBy: null };
 
-    records.push({
-      license_plate: plate.value.trim(),
-      brand: normalizeBrand(merk.value),
-      model_trim: typeof tipe.value === "string" ? tipe.value.trim() : null,
-      year: typeof tahun.value === "number" ? tahun.value : null,
-      transmission: typeof transmisi.value === "string" ? transmisi.value : null,
-      color: typeof warna.value === "string" ? warna.value : null,
-      odometer_km: typeof km.value === "number" ? km.value : null,
-      stnk_expiry_date: parseIndonesianDate(tglStnk.value),
-      vin: typeof noRangka.value === "string" ? noRangka.value.trim() : null,
-      engine_no: typeof noMesin.value === "string" ? noMesin.value.trim() : null,
-      purchase_date: tglBeli.value instanceof Date ? tglBeli.value : null,
-      status,
-      reserved_by: reservedBy,
-      source: typeof source.value === "string" ? source.value.trim() : null,
-      ownership: typeof statusKepemilikan.value === "string" ? statusKepemilikan.value : null,
-      purchase_price: typeof hargaBeli.value === "number" ? hargaBeli.value : null,
-      recon_cost: typeof totalActualRekondisi.value === "number" ? totalActualRekondisi.value : null,
-      gp_amount: typeof prediksiGp.value === "number" ? prediksiGp.value : null,
-      selling_price_cash: typeof hargaJualCash.value === "number" ? hargaJualCash.value : null,
-      selling_price_credit: typeof hargaJualKredit.value === "number" ? hargaJualKredit.value : null,
-      appraiser: typeof appraiser.value === "string" ? appraiser.value.trim() : null,
-      row_index: r,
-    });
+      records.push({
+        license_plate: plate.value.trim(),
+        brand: normalizeBrand(merk.value),
+        model_trim: typeof tipe.value === "string" ? tipe.value.trim() : null,
+        year: typeof tahun.value === "number" ? tahun.value : null,
+        transmission: typeof transmisi.value === "string" ? transmisi.value : null,
+        color: typeof warna.value === "string" ? warna.value : null,
+        odometer_km: typeof km.value === "number" ? km.value : null,
+        stnk_expiry_date: parseIndonesianDate(tglStnk.value),
+        vin: typeof noRangka.value === "string" ? noRangka.value.trim() : null,
+        engine_no: typeof noMesin.value === "string" ? noMesin.value.trim() : null,
+        purchase_date: tglBeli.value instanceof Date ? tglBeli.value : null,
+        status,
+        reserved_by: reservedBy,
+        source: typeof source.value === "string" ? source.value.trim() : null,
+        ownership: typeof statusKepemilikan.value === "string" ? statusKepemilikan.value : null,
+        purchase_price: typeof hargaBeli.value === "number" ? hargaBeli.value : null,
+        recon_cost: typeof totalActualRekondisi.value === "number" ? totalActualRekondisi.value : null,
+        gp_amount: typeof prediksiGp.value === "number" ? prediksiGp.value : null,
+        selling_price_cash: typeof hargaJualCash.value === "number" ? hargaJualCash.value : null,
+        selling_price_credit: typeof hargaJualKredit.value === "number" ? hargaJualKredit.value : null,
+        appraiser: typeof appraiser.value === "string" ? appraiser.value.trim() : null,
+        row_index: r,
+      });
+    } catch {
+      // no skipped-rows channel on this (currently unused) loader -- a
+      // malformed row is simply omitted rather than aborting the sheet.
+      continue;
+    }
   }
 
   return { records };

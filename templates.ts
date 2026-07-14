@@ -16,8 +16,8 @@ import { VehicleRow, SkippedRow, getCell, normalizeBrand, cleanPlate, parseIndon
 
 export const MAPPABLE_FIELDS = [
   "license_plate", "vin", "engine_no", "brand", "model_trim", "year",
-  "transmission", "color", "odometer_km", "stnk_expiry_date", "status",
-  "location", "ownership", "price_cash", "price_credit",
+  "transmission", "color", "odometer_km", "stnk_expiry_date", "purchase_date",
+  "handover_date", "status", "location", "ownership", "price_cash", "price_credit",
   "max_credit_discount", "notes_raw", "source",
 ] as const;
 
@@ -66,6 +66,33 @@ function looksLikeLabel(value: unknown): boolean {
 function getRange(ws: XLSX.WorkSheet): { s: { r: number; c: number }; e: { r: number; c: number } } {
   const ref = ws["!ref"] as string | undefined;
   return ref ? XLSX.utils.decode_range(ref) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+}
+
+export interface SheetSummary {
+  name: string;
+  rowCount: number;
+  colCount: number;
+}
+
+/**
+ * Cheap, O(1)-per-sheet summary for the sheet-selection step (see
+ * routes/upload.ts) -- just decodes each sheet's declared !ref, no cell
+ * iteration at all. rowCount/colCount are the *declared* dimensions, which
+ * can be inflated by leftover formatting bleed on a sheet whose real data is
+ * much narrower/shorter (see the "Daily Inventory HQ3&CV" investigation,
+ * where a sheet's real ~70 columns of data had a declared range out to
+ * column 16,372) -- that inflation is itself part of the sanity signal this
+ * is meant to surface, not something to hide from the caller.
+ */
+export function getSheetSummaries(wb: XLSX.WorkBook): SheetSummary[] {
+  return wb.SheetNames.map((name) => {
+    const range = getRange(wb.Sheets[name]);
+    return {
+      name,
+      rowCount: range.e.r - range.s.r + 1,
+      colCount: range.e.c - range.s.c + 1,
+    };
+  });
 }
 
 function headerCellsAtRow(ws: XLSX.WorkSheet, row: number, maxCol: number): HeaderCell[] {
@@ -126,10 +153,21 @@ export function computeHeaderFingerprint(headerCells: HeaderCell[]): string {
   return crypto.createHash("sha256").update(normalized).digest("hex");
 }
 
-/** A handful of data rows keyed by column letter -- used both as AI sample input and as the human-facing preview. */
+/**
+ * A handful of data rows keyed by column letter -- used both as AI sample
+ * input and as the human-facing raw preview. Skips blank rows rather than
+ * stopping at the first one: several known real formats have an
+ * intentional blank spacer row immediately after the header (e.g.
+ * Pricelist/SMR, header row N, data starting N+2) -- treating that as
+ * "end of data" would return an empty preview despite real rows existing
+ * a line further down. The scan itself is still bounded, so a sheet that's
+ * genuinely empty (or has a huge declared range with no real data) can't
+ * turn this into an unbounded walk.
+ */
 export function buildPreviewRows(ws: XLSX.WorkSheet, headerCells: HeaderCell[], dataStartRow: number, maxRows: number): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
-  for (let r = dataStartRow; r < dataStartRow + maxRows; r++) {
+  const scanLimit = dataStartRow + Math.max(maxRows * 20, 50);
+  for (let r = dataStartRow; r < scanLimit && rows.length < maxRows; r++) {
     const row: Record<string, unknown> = {};
     let hasValue = false;
     for (const { col } of headerCells) {
@@ -137,7 +175,7 @@ export function buildPreviewRows(ws: XLSX.WorkSheet, headerCells: HeaderCell[], 
       if (value !== null) hasValue = true;
       row[col] = value;
     }
-    if (!hasValue) break; // ran out of data
+    if (!hasValue) continue; // skip blank spacer rows rather than assuming end-of-data
     rows.push(row);
   }
   return rows;
@@ -201,65 +239,75 @@ export function extractRowsWithMapping(
   const get = (field: MappableField, r: number) => (cols[field] ? getCell(ws, cols[field]!, r) : { value: null, isError: false });
 
   for (let r = mapping.dataStartRow; r <= lastRow; r++) {
-    const plate = get("license_plate", r);
-    const merk = get("brand", r);
+    // A single malformed row (unexpected cell shape, a helper throwing on
+    // something it wasn't defended against) must never abort the whole
+    // sheet -- catch it, record the real reason, and keep going.
+    try {
+      const plate = get("license_plate", r);
+      const merk = get("brand", r);
 
-    if (plate.value === null && merk.value === null && !plate.isError && !merk.isError) {
-      continue; // blank spacer row
+      if (plate.value === null && merk.value === null && !plate.isError && !merk.isError) {
+        continue; // blank spacer row
+      }
+      if (plate.isError || merk.isError) {
+        skipped.push({ sheet: sheetName, row: r, reason: "#REF! error" });
+        continue;
+      }
+
+      const tipe = get("model_trim", r);
+      const transmisi = get("transmission", r);
+      const tahun = get("year", r);
+      const warna = get("color", r);
+      const km = get("odometer_km", r);
+      const tglStnk = get("stnk_expiry_date", r);
+      const tglBeli = get("purchase_date", r);
+      const tglHandover = get("handover_date", r);
+      const hargaCash = get("price_cash", r);
+      const hargaKredit = get("price_credit", r);
+      const maxDisc = get("max_credit_discount", r);
+      const kepemilikan = get("ownership", r);
+      const keterangan = get("notes_raw", r);
+      const posisiUnit = get("status", r);
+      const lokasi = get("location", r);
+      const vinCell = get("vin", r);
+      const engineCell = get("engine_no", r);
+      const sourceCell = get("source", r);
+
+      const { status, reservedBy } = typeof posisiUnit.value === "string"
+        ? parseStatusAndReserved(posisiUnit.value)
+        : { status: mapping.statusDefault ?? null, reservedBy: null };
+
+      const vehicleRow: VehicleRow = {
+        license_plate: cleanPlate(plate.value),
+        vin: typeof vinCell.value === "string" ? vinCell.value.trim() : null,
+        engine_no: typeof engineCell.value === "string" ? engineCell.value.trim() : null,
+        brand: normalizeBrand(merk.value),
+        model_trim: typeof tipe.value === "string" ? tipe.value.trim() : null,
+        year: typeof tahun.value === "number" ? tahun.value : null,
+        transmission: typeof transmisi.value === "string" ? transmisi.value : null,
+        color: typeof warna.value === "string" ? warna.value : null,
+        odometer_km: typeof km.value === "number" ? km.value : null,
+        stnk_expiry_date: tglStnk.value instanceof Date ? tglStnk.value : parseIndonesianDate(tglStnk.value),
+        purchase_date: tglBeli.value instanceof Date ? tglBeli.value : parseIndonesianDate(tglBeli.value),
+        handover_date: tglHandover.value instanceof Date ? tglHandover.value : parseIndonesianDate(tglHandover.value),
+        status,
+        reserved_by: reservedBy,
+        location: typeof lokasi.value === "string" ? lokasi.value : mapping.locationDefault ?? null,
+        ownership: typeof kepemilikan.value === "string" ? kepemilikan.value : null,
+        price_cash: typeof hargaCash.value === "number" && hargaCash.value !== 0 ? hargaCash.value : null,
+        price_credit: typeof hargaKredit.value === "number" && hargaKredit.value !== 0 ? hargaKredit.value : null,
+        max_credit_discount: maxDisc.isError ? null : typeof maxDisc.value === "string" ? maxDisc.value : null,
+        notes_raw: typeof keterangan.value === "string" ? keterangan.value : null,
+        source: typeof sourceCell.value === "string" ? sourceCell.value : null,
+        sheet_name: sheetName,
+        row_index: r,
+      };
+
+      flagged.push(...checkPriceSanity(vehicleRow, sheetName));
+      rows.push(vehicleRow);
+    } catch (err: any) {
+      skipped.push({ sheet: sheetName, row: r, reason: err?.message ?? String(err) });
     }
-    if (plate.isError || merk.isError) {
-      skipped.push({ sheet: sheetName, row: r, reason: "#REF! error" });
-      continue;
-    }
-
-    const tipe = get("model_trim", r);
-    const transmisi = get("transmission", r);
-    const tahun = get("year", r);
-    const warna = get("color", r);
-    const km = get("odometer_km", r);
-    const tglStnk = get("stnk_expiry_date", r);
-    const hargaCash = get("price_cash", r);
-    const hargaKredit = get("price_credit", r);
-    const maxDisc = get("max_credit_discount", r);
-    const kepemilikan = get("ownership", r);
-    const keterangan = get("notes_raw", r);
-    const posisiUnit = get("status", r);
-    const lokasi = get("location", r);
-    const vinCell = get("vin", r);
-    const engineCell = get("engine_no", r);
-    const sourceCell = get("source", r);
-
-    const { status, reservedBy } = posisiUnit.value
-      ? parseStatusAndReserved(posisiUnit.value as string)
-      : { status: mapping.statusDefault ?? null, reservedBy: null };
-
-    const vehicleRow: VehicleRow = {
-      license_plate: cleanPlate(plate.value),
-      vin: typeof vinCell.value === "string" ? vinCell.value.trim() : null,
-      engine_no: typeof engineCell.value === "string" ? engineCell.value.trim() : null,
-      brand: normalizeBrand(merk.value),
-      model_trim: typeof tipe.value === "string" ? tipe.value.trim() : null,
-      year: typeof tahun.value === "number" ? tahun.value : null,
-      transmission: typeof transmisi.value === "string" ? transmisi.value : null,
-      color: typeof warna.value === "string" ? warna.value : null,
-      odometer_km: typeof km.value === "number" ? km.value : null,
-      stnk_expiry_date: tglStnk.value instanceof Date ? tglStnk.value : parseIndonesianDate(tglStnk.value),
-      stock_entry_date: null, // generic mappings don't derive this -- no reliable "Age" convention across arbitrary formats
-      status,
-      reserved_by: reservedBy,
-      location: typeof lokasi.value === "string" ? lokasi.value : mapping.locationDefault ?? null,
-      ownership: typeof kepemilikan.value === "string" ? kepemilikan.value : null,
-      price_cash: typeof hargaCash.value === "number" && hargaCash.value !== 0 ? hargaCash.value : null,
-      price_credit: typeof hargaKredit.value === "number" && hargaKredit.value !== 0 ? hargaKredit.value : null,
-      max_credit_discount: maxDisc.isError ? null : typeof maxDisc.value === "string" ? maxDisc.value : null,
-      notes_raw: typeof keterangan.value === "string" ? keterangan.value : null,
-      source: typeof sourceCell.value === "string" ? sourceCell.value : null,
-      sheet_name: sheetName,
-      row_index: r,
-    };
-
-    flagged.push(...checkPriceSanity(vehicleRow, sheetName));
-    rows.push(vehicleRow);
   }
 
   return { rows, skipped, flagged };

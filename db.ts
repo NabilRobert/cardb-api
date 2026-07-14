@@ -5,14 +5,51 @@
  * ingest_excel.ts creates its own short-lived pool since it runs once and exits.)
  */
 
-import { Pool } from "pg";
+import { Pool, types } from "pg";
 import * as dotenv from "dotenv";
 import { VehicleRow } from "./parser";
 import { ColumnMapping } from "./templates";
 
 dotenv.config();
 
+// Postgres DATE columns represent a calendar day with no timezone attached.
+// node-pg's default behavior parses them into a JS Date at local midnight,
+// which then shows the wrong calendar day once anything downstream (e.g.
+// JSON.stringify's implicit toISOString()) applies UTC semantics to it.
+// Returning the raw "YYYY-MM-DD" string instead sidesteps that entirely --
+// see formatDateOnly below, which reformats straight from this string.
+types.setTypeParser(1082 /* date */, (val) => val);
+
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+// API responses show every date as day-month-year only, with no time
+// component -- these two helpers are the one place that conversion happens,
+// applied to every row before it leaves db.ts (see formatVehicleRow /
+// formatUploadRow below).
+function formatDateOnly(raw: string): string {
+  const [y, m, d] = raw.split("-");
+  return `${d}-${m}-${y}`;
+}
+
+function formatTimestamp(d: Date): string {
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${day}-${month}-${d.getUTCFullYear()}`;
+}
+
+const DATE_ONLY_FIELDS = ["stnk_expiry_date", "purchase_date", "handover_date"] as const;
+const TIMESTAMP_FIELDS = ["created_at", "updated_at", "uploaded_at"] as const;
+
+function formatRowDates<T extends Record<string, any>>(row: T): T {
+  const out: any = { ...row };
+  for (const field of DATE_ONLY_FIELDS) {
+    if (out[field] != null) out[field] = formatDateOnly(String(out[field]));
+  }
+  for (const field of TIMESTAMP_FIELDS) {
+    if (out[field] instanceof Date) out[field] = formatTimestamp(out[field]);
+  }
+  return out;
+}
 
 export async function insertVehicles(filename: string, rows: VehicleRow[], skipped: number) {
   const client = await pool.connect();
@@ -28,14 +65,14 @@ export async function insertVehicles(filename: string, rows: VehicleRow[], skipp
       await client.query(
         `INSERT INTO vehicles (
           license_plate, vin, engine_no, brand, model_trim, year,
-          transmission, color, odometer_km, stnk_expiry_date, stock_entry_date,
+          transmission, color, odometer_km, stnk_expiry_date, purchase_date, handover_date,
           status, reserved_by, location, ownership,
           price_cash, price_credit, max_credit_discount,
           notes_raw, source, upload_id, sheet_name, row_index
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
         [
           r.license_plate, r.vin, r.engine_no, r.brand, r.model_trim, r.year,
-          r.transmission, r.color, r.odometer_km, r.stnk_expiry_date, r.stock_entry_date,
+          r.transmission, r.color, r.odometer_km, r.stnk_expiry_date, r.purchase_date, r.handover_date,
           r.status, r.reserved_by, r.location, r.ownership,
           r.price_cash, r.price_credit, r.max_credit_discount,
           r.notes_raw, r.source, uploadId, r.sheet_name, r.row_index,
@@ -54,7 +91,7 @@ export async function insertVehicles(filename: string, rows: VehicleRow[], skipp
 
 export async function getAllVehicles() {
   const result = await pool.query("SELECT * FROM vehicles ORDER BY id DESC");
-  return result.rows;
+  return result.rows.map(formatRowDates);
 }
 
 // Columns exposed via GET /api/vehicles/search. Anything not listed here
@@ -71,7 +108,8 @@ const NUMERIC_RANGE_FIELDS: Record<string, { min: string; max: string }> = {
 };
 const DATE_RANGE_FIELDS: Record<string, { before: string; after: string }> = {
   stnk_expiry_date: { before: "stnk_expiry_before", after: "stnk_expiry_after" },
-  stock_entry_date: { before: "stock_entry_before", after: "stock_entry_after" },
+  purchase_date: { before: "purchase_date_before", after: "purchase_date_after" },
+  handover_date: { before: "handover_date_before", after: "handover_date_after" },
 };
 const SORT_WHITELIST = [
   ...TEXT_ILIKE_FIELDS, ...EXACT_FIELDS, "year", "odometer_km", "price_cash", "price_credit", "created_at",
@@ -168,12 +206,12 @@ export async function searchVehicles(query: VehicleSearchParams) {
   const sql = `SELECT * FROM vehicles ${whereSql} ORDER BY ${orderSql} LIMIT ${pushData(limit)} OFFSET ${pushData(offset)}`;
 
   const result = await pool.query(sql, dataParams);
-  return { rows: result.rows, total };
+  return { rows: result.rows.map(formatRowDates), total };
 }
 
 export async function getVehicleById(id: number) {
   const result = await pool.query("SELECT * FROM vehicles WHERE id = $1", [id]);
-  return result.rows[0] ?? null;
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
 }
 
 // Columns editable via PATCH /api/vehicles/:id. Anything not listed here
@@ -207,7 +245,7 @@ export async function updateVehicle(id: number, fields: Record<string, unknown>)
   setClauses.push("updated_at = now()");
   const sql = `UPDATE vehicles SET ${setClauses.join(", ")} WHERE id = ${push(id)} RETURNING *`;
   const result = await pool.query(sql, params);
-  return result.rows[0] ?? null;
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
 }
 
 export async function deleteVehicle(id: number) {
@@ -220,7 +258,7 @@ export async function getUploads({ limit, offset }: { limit: number; offset: num
     "SELECT id, filename, uploaded_at, rows_inserted, rows_skipped FROM uploads ORDER BY uploaded_at DESC LIMIT $1 OFFSET $2",
     [limit, offset]
   );
-  return result.rows;
+  return result.rows.map(formatRowDates);
 }
 
 export interface ImportTemplate {

@@ -1,30 +1,44 @@
 /**
  * routes/upload.ts
  *
- * POST /api/upload - accepts an .xlsx file. For each sheet, detects the
- * header row and looks its fingerprint up in the import_templates registry
- * (see templates.ts):
- *   - Known fingerprint -> parse + insert immediately using the stored
- *     column_mapping. Fast, free, deterministic, no AI involved.
- *   - Unknown fingerprint -> nothing is inserted from this upload. One
- *     SumoPod call proposes a column_mapping (see ai.ts); if it can't
- *     confidently identify license_plate/brand, responds with
- *     needs_clarification, otherwise needs_mapping_review (proposed mapping
- *     + a preview of parsed rows, for a human to confirm or edit).
- * If a workbook has multiple sheets and any one of them is unrecognized,
- * the whole upload halts at that sheet (nothing partially inserted) --
- * resubmit via /confirm-mapping, then re-upload the file to pick up any
- * remaining sheets.
+ * Three-step upload flow, all stateless (the uploaded file is never cached
+ * server-side between steps -- every step that needs the file's bytes gets
+ * it re-sent as multipart/form-data). Nothing is written to the database
+ * until the final confirm step.
  *
- * POST /api/upload/confirm-mapping - accepts the (possibly human-edited)
- * column mapping plus the original file re-sent as multipart/form-data.
- * Stateless by design: the uploaded file from the first request is never
- * cached server-side between the two calls. Saves the mapping into
- * import_templates (so this exact header shape is recognized from now on),
- * then parses and inserts using it.
+ * STEP 1 -- POST /api/upload
+ * Takes just the file. Does no parsing, no header detection, no
+ * fingerprinting, no insertion -- not even for a sheet whose format is
+ * already known. Only lists the sheet names present in the workbook plus
+ * cheap per-sheet stats (declared row/column count -- see
+ * templates.ts's getSheetSummaries for why "declared" matters: a sheet's
+ * !ref can be inflated by formatting bleed well beyond its real data).
+ * Source files regularly contain aggregate/summary/pivot sheets that were
+ * never meant to be imported, so nothing gets processed automatically
+ * until a sheet is explicitly chosen in step 2.
+ *
+ * STEP 2 -- POST /api/upload/process-sheet
+ * Takes the file again plus sheet_name. Runs header detection and
+ * fingerprinting scoped to just that one sheet:
+ *   - Known fingerprint -> parse using the stored column_mapping (no AI).
+ *   - Unknown fingerprint -> one SumoPod call proposes a column_mapping
+ *     (see ai.ts); if it can't confidently identify license_plate/brand,
+ *     responds with needs_clarification instead of guessing.
+ * Either way, if a mapping is available (stored or proposed), this parses
+ * the sheet with it and returns a preview -- row count, a sample of raw
+ * cell values, a sample of fully parsed rows, anything skipped/flagged --
+ * WITHOUT inserting anything. A known format now gets exactly the same
+ * preview-before-commit treatment an unrecognized one already required.
+ *
+ * STEP 3 -- POST /api/upload/confirm-mapping
+ * Takes the file again plus sheet_name and the (possibly human-edited)
+ * mapping from step 2. Saves the mapping into import_templates (harmless
+ * no-op re-save if it was already a registry hit; for a freshly-proposed
+ * mapping this is what makes the format recognized from now on), then
+ * parses and inserts for real.
  */
 
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import multer from "multer";
 import * as XLSX from "xlsx";
 import { insertVehicles, findTemplateByFingerprint, saveImportTemplate } from "../db";
@@ -36,123 +50,182 @@ import {
   computeHeaderFingerprint,
   buildPreviewRows,
   extractRowsWithMapping,
+  getSheetSummaries,
   ColumnMapping,
 } from "../templates";
-import { VehicleRow, SkippedRow } from "../parser";
-import { FlaggedRow } from "../templates";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 const router = Router();
 
-router.post("/", requireApiKey, upload.single("file"), async (req: Request, res: Response) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded (expected form field 'file')" });
-  }
+// Wraps an async handler so any rejected promise reaches Express's error
+// pipeline (and this file's own res.status(500) catch blocks below) instead
+// of becoming an unhandled rejection -- the last line of defense alongside
+// the try/catch already inside each handler. See server.ts for the global
+// error middleware and process-level safety net this ultimately feeds into.
+function asyncRoute(fn: (req: Request, res: Response) => Promise<void | Response>) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    fn(req, res).catch(next);
+  };
+}
 
-  try {
-    const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
-    const resolved: { sheetName: string; ws: XLSX.WorkSheet; mapping: ColumnMapping }[] = [];
+function readWorkbook(buffer: Buffer): XLSX.WorkBook {
+  return XLSX.read(buffer, { type: "buffer", cellDates: true });
+}
 
-    for (const sheetName of wb.SheetNames) {
+// STEP 1 -----------------------------------------------------------------
+
+router.post(
+  "/",
+  requireApiKey,
+  upload.single("file"),
+  asyncRoute(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded (expected form field 'file')" });
+    }
+
+    try {
+      const wb = readWorkbook(req.file.buffer);
+      const sheets = getSheetSummaries(wb);
+      res.json({ status: "select_sheet", sheets });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to read the file", detail: err.message });
+    }
+  })
+);
+
+// STEP 2 -------------------------------------------------------------------
+
+router.post(
+  "/process-sheet",
+  requireApiKey,
+  upload.single("file"),
+  asyncRoute(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded (expected form field 'file')" });
+    }
+    const sheetName = typeof req.body.sheet_name === "string" ? req.body.sheet_name.trim() : "";
+    if (!sheetName) {
+      return res.status(400).json({ error: "Missing 'sheet_name' form field" });
+    }
+
+    try {
+      const wb = readWorkbook(req.file.buffer);
       const ws = wb.Sheets[sheetName];
+      if (!ws) {
+        return res.status(400).json({ error: `Sheet '${sheetName}' not found in the uploaded file` });
+      }
+
       const { headerRow, dataStartRow, headerCells } = detectHeaderRow(ws);
-      if (headerCells.length === 0) continue; // nothing that looks like a header -- nothing to import from this sheet
+      if (headerCells.length === 0) {
+        return res.json({
+          status: "no_header_detected",
+          sheet: sheetName,
+          message: "No header row could be detected in this sheet -- it may not be a data sheet.",
+        });
+      }
 
       const fingerprint = computeHeaderFingerprint(headerCells);
       const template = await findTemplateByFingerprint(fingerprint);
 
+      let mapping: ColumnMapping;
+      let source: "registry" | "ai_proposed";
+      let usage: unknown;
+
       if (template) {
-        resolved.push({ sheetName, ws, mapping: template.column_mapping });
-        continue;
+        mapping = template.column_mapping;
+        source = "registry";
+      } else {
+        const sampleRows = buildPreviewRows(ws, headerCells, dataStartRow, 5);
+        const proposal = await proposeColumnMapping(headerCells, sampleRows);
+
+        if (proposal.status === "needs_clarification") {
+          return res.json({ status: "needs_clarification", sheet: sheetName, message: proposal.message, usage: proposal.usage });
+        }
+
+        mapping = { headerRow, dataStartRow, columns: proposal.columns };
+        source = "ai_proposed";
+        usage = proposal.usage;
       }
 
-      // Unrecognized header shape -- stop here, don't insert anything from
-      // this upload yet (even sheets already resolved above).
-      const sampleRows = buildPreviewRows(ws, headerCells, dataStartRow, 5);
-      const proposal = await proposeColumnMapping(headerCells, sampleRows);
-
-      if (proposal.status === "needs_clarification") {
-        return res.json({ status: "needs_clarification", sheet: sheetName, message: proposal.message, usage: proposal.usage });
-      }
-
-      const proposedMapping: ColumnMapping = { headerRow, dataStartRow, columns: proposal.columns };
-      return res.json({
-        status: "needs_mapping_review",
-        sheet: sheetName,
-        headerRow: headerCells,
-        proposedMapping,
-        preview: buildPreviewRows(ws, headerCells, dataStartRow, 10),
-        usage: proposal.usage,
-      });
-    }
-
-    let allRows: VehicleRow[] = [];
-    let allSkipped: SkippedRow[] = [];
-    let allFlagged: FlaggedRow[] = [];
-    for (const { sheetName, ws, mapping } of resolved) {
       const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName);
-      allRows = allRows.concat(rows);
-      allSkipped = allSkipped.concat(skipped);
-      allFlagged = allFlagged.concat(flagged);
+
+      res.json({
+        status: "preview",
+        sheet: sheetName,
+        source,
+        headerRow: headerCells,
+        mapping,
+        rowCount: rows.length,
+        rawPreview: buildPreviewRows(ws, headerCells, dataStartRow, 10),
+        parsedPreview: rows.slice(0, 10),
+        skipped,
+        flagged,
+        ...(usage ? { usage } : {}),
+      });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to process the sheet", detail: err.message });
+    }
+  })
+);
+
+// STEP 3 -------------------------------------------------------------------
+
+router.post(
+  "/confirm-mapping",
+  requireApiKey,
+  upload.single("file"),
+  asyncRoute(async (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded (expected form field 'file')" });
     }
 
-    const { uploadId, inserted } = await insertVehicles(req.file.originalname, allRows, allSkipped.length);
-    res.json({ uploadId, inserted, skipped: allSkipped, flagged: allFlagged });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to parse or insert the file", detail: err.message });
-  }
-});
-
-router.post("/confirm-mapping", requireApiKey, upload.single("file"), async (req: Request, res: Response) => {
-  if (!req.file) {
-    return res.status(400).json({ error: "No file uploaded (expected form field 'file')" });
-  }
-
-  const sheetName = typeof req.body.sheet_name === "string" ? req.body.sheet_name.trim() : "";
-  if (!sheetName) {
-    return res.status(400).json({ error: "Missing 'sheet_name' form field" });
-  }
-
-  let mapping: ColumnMapping;
-  try {
-    mapping = JSON.parse(req.body.mapping);
-  } catch {
-    return res.status(400).json({ error: "'mapping' form field must be valid JSON" });
-  }
-  if (!mapping || typeof mapping.headerRow !== "number" || typeof mapping.dataStartRow !== "number" || typeof mapping.columns !== "object") {
-    return res.status(400).json({ error: "'mapping' must be an object with headerRow, dataStartRow, and columns" });
-  }
-  if (!mapping.columns.license_plate || !mapping.columns.brand) {
-    return res.status(400).json({ error: "mapping.columns must include at least license_plate and brand" });
-  }
-
-  const sheetLabel = typeof req.body.sheet_label === "string" && req.body.sheet_label.trim() ? req.body.sheet_label.trim() : sheetName;
-
-  try {
-    const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
-    const ws = wb.Sheets[sheetName];
-    if (!ws) {
-      return res.status(400).json({ error: `Sheet '${sheetName}' not found in the re-uploaded file` });
+    const sheetName = typeof req.body.sheet_name === "string" ? req.body.sheet_name.trim() : "";
+    if (!sheetName) {
+      return res.status(400).json({ error: "Missing 'sheet_name' form field" });
     }
 
-    // Fingerprint is recomputed from what's actually in the re-uploaded file
-    // at the (possibly human-edited) header row the mapping specifies --
-    // never trusted blindly from the request.
-    const headerCells = extractHeaderCellsAtRow(ws, mapping.headerRow);
-    const fingerprint = computeHeaderFingerprint(headerCells);
+    let mapping: ColumnMapping;
+    try {
+      mapping = JSON.parse(req.body.mapping);
+    } catch {
+      return res.status(400).json({ error: "'mapping' form field must be valid JSON" });
+    }
+    if (!mapping || typeof mapping.headerRow !== "number" || typeof mapping.dataStartRow !== "number" || typeof mapping.columns !== "object") {
+      return res.status(400).json({ error: "'mapping' must be an object with headerRow, dataStartRow, and columns" });
+    }
+    if (!mapping.columns.license_plate || !mapping.columns.brand) {
+      return res.status(400).json({ error: "mapping.columns must include at least license_plate and brand" });
+    }
 
-    await saveImportTemplate(fingerprint, sheetLabel, mapping);
+    const sheetLabel = typeof req.body.sheet_label === "string" && req.body.sheet_label.trim() ? req.body.sheet_label.trim() : sheetName;
 
-    const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName);
-    const { uploadId, inserted } = await insertVehicles(req.file.originalname, rows, skipped.length);
+    try {
+      const wb = readWorkbook(req.file.buffer);
+      const ws = wb.Sheets[sheetName];
+      if (!ws) {
+        return res.status(400).json({ error: `Sheet '${sheetName}' not found in the re-uploaded file` });
+      }
 
-    res.json({ uploadId, inserted, skipped, flagged, templateSaved: true });
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to confirm mapping or insert the file", detail: err.message });
-  }
-});
+      // Fingerprint is recomputed from what's actually in the re-uploaded file
+      // at the (possibly human-edited) header row the mapping specifies --
+      // never trusted blindly from the request.
+      const headerCells = extractHeaderCellsAtRow(ws, mapping.headerRow);
+      const fingerprint = computeHeaderFingerprint(headerCells);
+
+      await saveImportTemplate(fingerprint, sheetLabel, mapping);
+
+      const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName);
+      const { uploadId, inserted } = await insertVehicles(req.file.originalname, rows, skipped.length);
+
+      res.json({ uploadId, inserted, skipped, flagged, templateSaved: true });
+    } catch (err: any) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to confirm mapping or insert the file", detail: err.message });
+    }
+  })
+);
 
 export default router;
