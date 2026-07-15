@@ -18,7 +18,7 @@ export const MAPPABLE_FIELDS = [
   "license_plate", "vin", "engine_no", "brand", "model_trim", "year",
   "transmission", "color", "odometer_km", "stnk_expiry_date", "purchase_date",
   "handover_date", "status", "location", "ownership", "price_cash", "price_credit",
-  "max_credit_discount", "notes_raw", "source",
+  "price_net", "max_credit_discount", "notes_raw", "source",
 ] as const;
 
 export type MappableField = (typeof MAPPABLE_FIELDS)[number];
@@ -226,7 +226,7 @@ const MIN_PLAUSIBLE_PRICE = 500_000;
 
 function checkPriceSanity(row: VehicleRow, sheetName: string): FlaggedRow[] {
   const flags: FlaggedRow[] = [];
-  for (const field of ["price_cash", "price_credit"] as const) {
+  for (const field of ["price_cash", "price_credit", "price_net"] as const) {
     const value = row[field];
     if (typeof value === "number" && value > 0 && value < MIN_PLAUSIBLE_PRICE) {
       flags.push({
@@ -303,6 +303,7 @@ export function extractRowsWithMapping(
       const tglHandover = get("handover_date", r);
       const hargaCash = get("price_cash", r);
       const hargaKredit = get("price_credit", r);
+      const hargaNet = get("price_net", r);
       const maxDisc = get("max_credit_discount", r);
       const kepemilikan = get("ownership", r);
       const keterangan = get("notes_raw", r);
@@ -335,6 +336,7 @@ export function extractRowsWithMapping(
         ownership: typeof kepemilikan.value === "string" ? kepemilikan.value : null,
         price_cash: typeof hargaCash.value === "number" && hargaCash.value !== 0 ? hargaCash.value : null,
         price_credit: typeof hargaKredit.value === "number" && hargaKredit.value !== 0 ? hargaKredit.value : null,
+        price_net: typeof hargaNet.value === "number" && hargaNet.value !== 0 ? hargaNet.value : null,
         max_credit_discount: maxDisc.isError ? null : typeof maxDisc.value === "string" ? maxDisc.value : null,
         notes_raw: typeof keterangan.value === "string" ? keterangan.value : null,
         source: typeof sourceCell.value === "string" ? sourceCell.value : null,

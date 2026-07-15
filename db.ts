@@ -67,14 +67,14 @@ export async function insertVehicles(filename: string, rows: VehicleRow[], skipp
           license_plate, vin, engine_no, brand, model_trim, year,
           transmission, color, odometer_km, stnk_expiry_date, purchase_date, handover_date,
           status, reserved_by, location, ownership,
-          price_cash, price_credit, max_credit_discount,
+          price_cash, price_credit, price_net, max_credit_discount,
           notes_raw, source, upload_id, sheet_name, row_index
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
         [
           r.license_plate, r.vin, r.engine_no, r.brand, r.model_trim, r.year,
           r.transmission, r.color, r.odometer_km, r.stnk_expiry_date, r.purchase_date, r.handover_date,
           r.status, r.reserved_by, r.location, r.ownership,
-          r.price_cash, r.price_credit, r.max_credit_discount,
+          r.price_cash, r.price_credit, r.price_net, r.max_credit_discount,
           r.notes_raw, r.source, uploadId, r.sheet_name, r.row_index,
         ]
       );
@@ -105,6 +105,7 @@ const NUMERIC_RANGE_FIELDS: Record<string, { min: string; max: string }> = {
   odometer_km: { min: "odometer_min", max: "odometer_max" },
   price_cash: { min: "price_min", max: "price_max" },
   price_credit: { min: "price_credit_min", max: "price_credit_max" },
+  price_net: { min: "price_net_min", max: "price_net_max" },
 };
 const DATE_RANGE_FIELDS: Record<string, { before: string; after: string }> = {
   stnk_expiry_date: { before: "stnk_expiry_before", after: "stnk_expiry_after" },
@@ -112,7 +113,7 @@ const DATE_RANGE_FIELDS: Record<string, { before: string; after: string }> = {
   handover_date: { before: "handover_date_before", after: "handover_date_after" },
 };
 const SORT_WHITELIST = [
-  ...TEXT_ILIKE_FIELDS, ...EXACT_FIELDS, "year", "odometer_km", "price_cash", "price_credit", "created_at",
+  ...TEXT_ILIKE_FIELDS, ...EXACT_FIELDS, "year", "odometer_km", "price_cash", "price_credit", "price_net", "created_at",
 ];
 
 export interface VehicleSearchParams {
@@ -218,7 +219,7 @@ export async function getVehicleById(id: number) {
 // (id, vin, license_plate, upload_id, created_at, ...) is immutable through
 // this route regardless of what the request body contains.
 const VEHICLE_EDITABLE_FIELDS = [
-  "status", "reserved_by", "price_cash", "price_credit", "max_credit_discount", "notes_raw", "location",
+  "status", "reserved_by", "price_cash", "price_credit", "price_net", "max_credit_discount", "notes_raw", "location",
 ] as const;
 
 export function isEditableVehicleField(field: string): boolean {

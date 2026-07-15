@@ -15,6 +15,7 @@
  *     odometer_min / odometer_max        -> odometer_km
  *     price_min / price_max              -> price_cash
  *     price_credit_min / price_credit_max -> price_credit
+ *     price_net_min / price_net_max      -> price_net
  *   Date ranges (before = <=, after = >=):
  *     stnk_expiry_before / stnk_expiry_after       -> stnk_expiry_date
  *     purchase_date_before / purchase_date_after   -> purchase_date
@@ -38,7 +39,7 @@
  *
  * PATCH /api/vehicles/:id - partial update of one vehicle. Body is a JSON object; only the
  * following fields are editable this way: status, reserved_by, price_cash, price_credit,
- * max_credit_discount, notes_raw, location. Any other field in the body (id, vin,
+ * price_net, max_credit_discount, notes_raw, location. Any other field in the body (id, vin,
  * license_plate, upload_id, created_at, etc.) is silently ignored -- same convention as
  * unrecognized query params on /search. If nothing editable remains after filtering (empty
  * or all-unknown body), returns 400. On success, updated_at is set to now() and the full
@@ -116,7 +117,7 @@ router.patch("/:id", requireApiKey, async (req: Request, res: Response) => {
   );
   if (Object.keys(editableFields).length === 0) {
     return res.status(400).json({
-      error: "No editable fields in body. Editable fields: status, reserved_by, price_cash, price_credit, max_credit_discount, notes_raw, location",
+      error: "No editable fields in body. Editable fields: status, reserved_by, price_cash, price_credit, price_net, max_credit_discount, notes_raw, location",
     });
   }
 
