@@ -152,6 +152,7 @@ export interface VehicleRow {
   ownership: string | null;
   price_cash: number | null;
   price_credit: number | null;
+  price_net: number | null;
   max_credit_discount: string | null;
   notes_raw: string | null;
   source: string | null;
@@ -236,6 +237,7 @@ export function loadPricelistSheet(ws: XLSX.WorkSheet): { rows: VehicleRow[]; sk
         ownership: typeof kepemilikan.value === "string" ? kepemilikan.value : null,
         price_cash: typeof hargaCash.value === "number" && hargaCash.value !== 0 ? hargaCash.value : null,
         price_credit: typeof hargaKredit.value === "number" && hargaKredit.value !== 0 ? hargaKredit.value : null,
+        price_net: null, // Pricelist has no separate net-price column
         max_credit_discount: maxDisc.isError ? null : typeof maxDisc.value === "string" ? maxDisc.value : null,
         notes_raw: typeof keterangan.value === "string" ? keterangan.value : null,
         source: null,
@@ -294,6 +296,7 @@ export function loadSmrSheet(ws: XLSX.WorkSheet): { rows: VehicleRow[]; skipped:
         ownership: null,
         price_cash: null,
         price_credit: null,
+        price_net: null,
         max_credit_discount: null,
         notes_raw: (typeof notes.value === "string" ? notes.value : typeof grade.value === "string" ? grade.value : null),
         source: null,

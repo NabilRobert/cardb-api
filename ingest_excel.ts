@@ -37,14 +37,14 @@ async function insertIntoDb(filename: string, rows: VehicleRow[]) {
           license_plate, vin, engine_no, brand, model_trim, year,
           transmission, color, odometer_km, stnk_expiry_date, purchase_date, handover_date,
           status, reserved_by, location, ownership,
-          price_cash, price_credit, max_credit_discount,
+          price_cash, price_credit, price_net, max_credit_discount,
           notes_raw, source, upload_id, sheet_name, row_index
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
         [
           r.license_plate, r.vin, r.engine_no, r.brand, r.model_trim, r.year,
           r.transmission, r.color, r.odometer_km, r.stnk_expiry_date, r.purchase_date, r.handover_date,
           r.status, r.reserved_by, r.location, r.ownership,
-          r.price_cash, r.price_credit, r.max_credit_discount,
+          r.price_cash, r.price_credit, r.price_net, r.max_credit_discount,
           r.notes_raw, r.source, uploadId, r.sheet_name, r.row_index,
         ]
       );

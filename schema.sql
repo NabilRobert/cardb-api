@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
     ownership TEXT,
     price_cash NUMERIC,
     price_credit NUMERIC,
+    price_net NUMERIC,          -- distinct "Harga Net"/"Harga Jual (NETT)" price, never a synonym for cash or credit
     max_credit_discount TEXT,
     notes_raw TEXT,            -- original "Keterangan" string, kept as-is
     source TEXT,               -- trade-in / acquisition provenance
