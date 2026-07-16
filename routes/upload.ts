@@ -31,6 +31,14 @@
  * now gets exactly the same preview-before-commit treatment an
  * unrecognized one already required.
  *
+ * Optional header_row / data_start_row form fields (both integers) bypass
+ * auto-detection entirely and re-scan the sheet at exactly that row instead
+ * -- e.g. to preview a second table further down a sheet whose own header
+ * row wouldn't otherwise win detectHeaderRow's auto-pick. Registry/AI-
+ * proposal logic downstream is unchanged, just parameterized by the
+ * override instead of the auto-detected row. Omit both for the previous,
+ * unchanged auto-detect behavior.
+ *
  * STEP 3 -- POST /api/upload/confirm-mapping
  * Takes the file again plus sheet_name and the (possibly human-edited)
  * mapping from step 2. Saves the mapping into import_templates (harmless
@@ -88,6 +96,15 @@ function readWorkbook(buffer: Buffer): XLSX.WorkBook {
   return XLSX.read(buffer, { type: "buffer", cellDates: true });
 }
 
+// Parses an optional integer form field. Returns undefined if the field
+// wasn't sent at all (the normal, unchanged-behavior case), or null if it
+// was sent but isn't a valid integer (caller should 400).
+function parseOptionalInt(raw: unknown): number | undefined | null {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "string" || !/^-?\d+$/.test(raw.trim())) return null;
+  return parseInt(raw, 10);
+}
+
 // STEP 1 -----------------------------------------------------------------
 
 router.post(
@@ -125,6 +142,17 @@ router.post(
       return res.status(400).json({ error: "Missing 'sheet_name' form field" });
     }
 
+    // Optional override: re-scan at exactly this row instead of accepting
+    // detectHeaderRow's auto-pick -- see file-level doc comment.
+    const headerRowOverride = parseOptionalInt(req.body.header_row);
+    const dataStartRowOverride = parseOptionalInt(req.body.data_start_row);
+    if (headerRowOverride === null) {
+      return res.status(400).json({ error: "'header_row' must be an integer" });
+    }
+    if (dataStartRowOverride === null) {
+      return res.status(400).json({ error: "'data_start_row' must be an integer" });
+    }
+
     try {
       const wb = readWorkbook(req.file.buffer);
       const ws = wb.Sheets[sheetName];
@@ -132,7 +160,20 @@ router.post(
         return res.status(400).json({ error: `Sheet '${sheetName}' not found in the uploaded file` });
       }
 
-      const { headerRow, dataStartRow, headerCells } = detectHeaderRow(ws);
+      let headerRow: number;
+      let dataStartRow: number;
+      let headerCells: ReturnType<typeof extractHeaderCellsAtRow>;
+
+      if (headerRowOverride !== undefined) {
+        headerRow = headerRowOverride;
+        dataStartRow = dataStartRowOverride ?? headerRow + 1;
+        headerCells = extractHeaderCellsAtRow(ws, headerRow);
+        console.log(`[process-sheet] header_row override: row=${headerRow} dataStartRow=${dataStartRow} headerCells=${headerCells.length}`);
+      } else {
+        ({ headerRow, dataStartRow, headerCells } = detectHeaderRow(ws));
+        console.log(`[process-sheet] auto-detected: row=${headerRow} dataStartRow=${dataStartRow} headerCells=${headerCells.length}`);
+      }
+
       if (headerCells.length === 0) {
         return res.json({
           status: "no_header_detected",
@@ -143,9 +184,18 @@ router.post(
 
       // Fingerprint/registry matching always uses the plain single-row scan
       // -- never the sub-row fallback below -- so it can't silently change
-      // which stored template a re-upload matches.
+      // which stored template a re-upload matches. Skipped entirely when a
+      // header_row override is given: the point of the override is to see
+      // exactly what a fresh scan of that specific row produces, not to
+      // risk matching an unrelated stored template by coincidence.
       const fingerprint = computeHeaderFingerprint(headerCells);
-      const template = await findTemplateByFingerprint(fingerprint);
+      const template = headerRowOverride !== undefined ? null : await findTemplateByFingerprint(fingerprint);
+      console.log(
+        `[process-sheet] fingerprint=${fingerprint.slice(0, 16)}... ` +
+          (headerRowOverride !== undefined
+            ? "registry lookup skipped (header_row override given)"
+            : `registryHit=${!!template}` + (template ? ` template.headerRow=${template.column_mapping.headerRow}` : ""))
+      );
 
       // Richer, display-only cell list: falls back to the row directly below
       // for any column that's blank at the detected header row (e.g. a

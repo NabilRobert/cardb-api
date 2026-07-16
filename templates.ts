@@ -207,13 +207,36 @@ export function extractHeaderCellsWithSubRow(ws: XLSX.WorkSheet, row: number): H
   const cells: HeaderCell[] = [];
   for (let c = 0; c <= maxCol; c++) {
     const col = colLetter(c);
-    let { value } = getCell(ws, col, row);
-    if (!looksLikeLabel(value)) {
-      const below = getCell(ws, col, row + 1).value;
-      if (looksLikeLabel(below)) value = below;
+    const primaryCell = getCell(ws, col, row);
+    let value = primaryCell.value;
+    const primaryOk = looksLikeLabel(value);
+    let usedFallback = false;
+    let fallbackCell: { value: unknown; isError: boolean } | null = null;
+    if (!primaryOk) {
+      fallbackCell = getCell(ws, col, row + 1);
+      if (looksLikeLabel(fallbackCell.value)) {
+        value = fallbackCell.value;
+        usedFallback = true;
+      }
     }
-    if (looksLikeLabel(value)) cells.push({ col, value: (value as string).trim() });
+    const included = looksLikeLabel(value);
+    // DEBUG (temporary, for the column-U investigation): the exact point
+    // each column's final label decision is made, for the columns in the
+    // range this sheet's second table lives in. Remove once resolved.
+    if (c >= 16 && c <= 48) {
+      console.log(
+        `[header-scan] row=${row} col=${col} primary=${JSON.stringify(primaryCell.value)} primaryOk=${primaryOk}` +
+          (fallbackCell ? ` fallbackRow=${row + 1} fallback=${JSON.stringify(fallbackCell.value)}` : "") +
+          ` usedFallback=${usedFallback} finalValue=${JSON.stringify(included ? value : null)} included=${included}`
+      );
+    }
+    if (included) cells.push({ col, value: (value as string).trim() });
   }
+  console.log(
+    `[header-scan] extractHeaderCellsWithSubRow(row=${row}) final list (${cells.length} cols): ` +
+      cells.map((c) => `${c.col}=${JSON.stringify(c.value)}`).join(", ")
+  );
+  console.log(`[header-scan] column U present in final list? ${cells.some((c) => c.col === "U")}`);
   return cells;
 }
 
