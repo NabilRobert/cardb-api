@@ -103,6 +103,44 @@ async function main() {
     3
   );
 
+  // "Daily Report Updated" (DSSM Bintaro file): unlike Pricelist/SMR above,
+  // we don't have the full literal header-row-2 text for every column of
+  // this real-world file -- only the column letters each field maps to,
+  // learned from an actual upload plus a human correction after the
+  // "Harga Jual" mis-mapping bug (see commit 6855bbd). The sheet also
+  // stacks a second table further down (header row 13) that reuses the
+  // same column letters for unrelated fields -- see ColumnMapping.regions
+  // in templates.ts. So this seeds the already-known-good fingerprint and
+  // mapping directly rather than rederiving the fingerprint from a
+  // reconstructed header row.
+  await saveImportTemplate(
+    "66ca37b572e65bf38426d291f897ef6e2aa02fd5dde6933b4f4abda7c8390efb",
+    "Daily Report Updated",
+    {
+      headerRow: 2,
+      dataStartRow: 3,
+      columns: {
+        license_plate: "E", vin: "M", engine_no: "N", brand: "F", model_trim: "G",
+        transmission: "H", year: "I", color: "J", odometer_km: "K", stnk_expiry_date: "L",
+        purchase_date: "O", handover_date: "AU", status: "D", ownership: "AW",
+        notes_raw: "AS", source: "AV",
+        price_credit: "Q", // table 1 header (row 2): Q = "Harga Real Jual Credit"
+        price_cash: "R",   // table 1 header (row 2): R = "Harga Real Jual Cash"
+      },
+      regions: [
+        {
+          fromRow: 13, // second header (row 13) redefines Q onward for rows below it
+          columns: {
+            price_credit: null, // no cash/credit split in this table
+            price_cash: null,
+            price_net: "Q", // row 13: Q = "Harga Jual (NETT)"
+          },
+        },
+      ],
+    }
+  );
+  console.log(`Seeded "Daily Report Updated" -> fingerprint 66ca37b572e6... (known fingerprint, not rederived)`);
+
   await pool.end();
 }
 
