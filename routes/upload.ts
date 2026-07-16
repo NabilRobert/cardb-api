@@ -51,6 +51,7 @@ import { proposeColumnMapping } from "../ai";
 import {
   detectHeaderRow,
   extractHeaderCellsAtRow,
+  extractHeaderCellsWithSubRow,
   computeHeaderFingerprint,
   buildPreviewRows,
   buildRawRowsForIndices,
@@ -140,8 +141,18 @@ router.post(
         });
       }
 
+      // Fingerprint/registry matching always uses the plain single-row scan
+      // -- never the sub-row fallback below -- so it can't silently change
+      // which stored template a re-upload matches.
       const fingerprint = computeHeaderFingerprint(headerCells);
       const template = await findTemplateByFingerprint(fingerprint);
+
+      // Richer, display-only cell list: falls back to the row directly below
+      // for any column that's blank at the detected header row (e.g. a
+      // merged group header with independent sub-labels one row down -- see
+      // extractHeaderCellsWithSubRow's doc comment). Used for what a human
+      // reviews and what the AI sees, never for the fingerprint above.
+      const displayHeaderCells = extractHeaderCellsWithSubRow(ws, headerRow);
 
       let mapping: ColumnMapping;
       let source: "registry" | "ai_proposed";
@@ -151,8 +162,8 @@ router.post(
         mapping = template.column_mapping;
         source = "registry";
       } else {
-        const sampleRows = buildPreviewRows(ws, headerCells, dataStartRow, 5);
-        const proposal = await proposeColumnMapping(headerCells, sampleRows);
+        const sampleRows = buildPreviewRows(ws, displayHeaderCells, dataStartRow, 5);
+        const proposal = await proposeColumnMapping(displayHeaderCells, sampleRows);
 
         if (proposal.status === "needs_clarification") {
           return res.json({ status: "needs_clarification", sheet: sheetName, message: proposal.message, usage: proposal.usage });
@@ -170,13 +181,13 @@ router.post(
       // Built from parsedPreview's own row_index values (not scanned
       // independently) so rawPreview and parsedPreview are guaranteed to
       // cover exactly the same rows, in the same order.
-      const rawPreview = buildRawRowsForIndices(ws, headerCells, parsedPreview.map((r) => r.row_index));
+      const rawPreview = buildRawRowsForIndices(ws, displayHeaderCells, parsedPreview.map((r) => r.row_index));
 
       res.json({
         status: "preview",
         sheet: sheetName,
         source,
-        headerRow: headerCells,
+        headerRow: displayHeaderCells,
         mapping,
         rowCount: rows.length,
         rawPreview,

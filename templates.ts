@@ -185,6 +185,39 @@ export function extractHeaderCellsAtRow(ws: XLSX.WorkSheet, row: number): Header
 }
 
 /**
+ * Like extractHeaderCellsAtRow, but for any column whose cell at `row`
+ * doesn't parse as a label, also checks the row directly below before
+ * giving up on that column. Some real-world sheets put a column's only
+ * readable label one row below a merged/grouped header cell -- e.g. "Daily
+ * Report Updated"'s row 13 has a merged "Market Price ..." header over
+ * columns U:V, with independent "Kredit"/"Cash" sub-labels at U14/V14; a
+ * single-row scan can end up missing column U there even though it has a
+ * real label and real per-row data, depending on exactly how the source
+ * file encodes the merged cell.
+ *
+ * Deliberately NOT used for computeHeaderFingerprint / registry matching --
+ * only for what's shown to a human (preview) and what's handed to the AI as
+ * sample context. Folding the fallback into fingerprinting would change the
+ * hash for sheets that already have stored templates, silently breaking
+ * their registry match.
+ */
+export function extractHeaderCellsWithSubRow(ws: XLSX.WorkSheet, row: number): HeaderCell[] {
+  const range = getRange(ws);
+  const maxCol = Math.min(range.e.c, MAX_HEADER_SCAN_COLS);
+  const cells: HeaderCell[] = [];
+  for (let c = 0; c <= maxCol; c++) {
+    const col = colLetter(c);
+    let { value } = getCell(ws, col, row);
+    if (!looksLikeLabel(value)) {
+      const below = getCell(ws, col, row + 1).value;
+      if (looksLikeLabel(below)) value = below;
+    }
+    if (looksLikeLabel(value)) cells.push({ col, value: (value as string).trim() });
+  }
+  return cells;
+}
+
+/**
  * Hashes the normalized header row (trim + uppercase each non-empty cell,
  * join, hash) so minor whitespace/casing differences between two uploads of
  * "the same" format don't produce a false-negative registry miss.
