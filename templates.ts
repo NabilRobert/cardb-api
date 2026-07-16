@@ -23,10 +23,33 @@ export const MAPPABLE_FIELDS = [
 
 export type MappableField = (typeof MAPPABLE_FIELDS)[number];
 
+/**
+ * Some real-world sheets stack two structurally different tables in one
+ * worksheet, sharing the same identity columns (plate, brand, model, ...)
+ * but reusing the same column *letters* further right for entirely
+ * different fields per table (e.g. "Daily Report Updated": rows 3-12 have
+ * Q/R = credit/cash price under one header at row 2, while rows 15+ reuse
+ * Q for an unrelated net price and have no cash/credit split at all, under
+ * a second header at row 13). A region overrides `columns` for the fields
+ * it lists, for rows in [fromRow, toRow] -- `null` means "this field does
+ * not apply to this region" (not "fall back to the base mapping"), so a
+ * field that's genuinely absent in one table doesn't inherit a column
+ * letter that means something else there. A field key absent from a
+ * region's `columns` (as opposed to present with value null) does fall
+ * back to the base mapping -- e.g. identity fields shared by both tables
+ * don't need to be repeated in every region.
+ */
+export interface ColumnMappingRegion {
+  fromRow: number;
+  toRow?: number; // inclusive; omitted = through the end of the sheet's data
+  columns: Partial<Record<MappableField, string | null>>;
+}
+
 export interface ColumnMapping {
   headerRow: number;
   dataStartRow: number;
   columns: Partial<Record<MappableField, string>>;
+  regions?: ColumnMappingRegion[];
   // Fallbacks for sheets that encode these by convention (e.g. "this whole
   // sheet is the SMR branch, everything in it is available") rather than a
   // per-row column -- only used when the corresponding column isn't mapped.
@@ -34,18 +57,39 @@ export interface ColumnMapping {
   statusDefault?: string;
 }
 
+/** Resolves which column letter (if any) applies to a field at a given sheet row, honoring region overrides. */
+function resolveColumn(mapping: ColumnMapping, field: MappableField, row: number): string | null {
+  if (mapping.regions) {
+    for (const region of mapping.regions) {
+      if (row >= region.fromRow && (region.toRow === undefined || row <= region.toRow)) {
+        if (field in region.columns) {
+          return region.columns[field] ?? null;
+        }
+        break; // matched region, but it defers this field to the base mapping
+      }
+    }
+  }
+  return mapping.columns[field] ?? null;
+}
+
 export interface HeaderCell {
   col: string;
   value: string;
 }
 
-// Scan the first ~10 rows for the header. Some real-world sheets declare a
+// Scan the first ~20 rows for the header. Some real-world sheets declare a
 // !ref far wider than their actual data (leftover cell-formatting bleed --
 // e.g. a sheet whose real data ends around column BR but whose !ref claims
 // column XER, see the "Daily Inventory HQ3&CV" investigation). Cap the
 // column scan so a bogus declared range can't turn a cheap header search
 // into a slow one.
-const MAX_HEADER_SCAN_ROWS = 10;
+//
+// 20 rows (not 10): some sheets stack a second table with its own header
+// further down (e.g. "Daily Report Updated"'s second header at row 13) --
+// if auto-detection can't see far enough to even consider that row, a human
+// reviewing an AI-proposed mapping never gets a chance to notice the sheet
+// has a second, differently-shaped table at all (see ColumnMappingRegion).
+const MAX_HEADER_SCAN_ROWS = 20;
 const MAX_HEADER_SCAN_COLS = 200;
 
 function colLetter(index: number): string {
@@ -269,9 +313,11 @@ export function extractRowsWithMapping(
 
   const range = getRange(ws);
   const lastRow = Math.min(range.e.r + 1, mapping.dataStartRow + MAX_DATA_ROWS);
-  const cols = mapping.columns;
 
-  const get = (field: MappableField, r: number) => (cols[field] ? getCell(ws, cols[field]!, r) : { value: null, isError: false });
+  const get = (field: MappableField, r: number) => {
+    const col = resolveColumn(mapping, field, r);
+    return col ? getCell(ws, col, r) : { value: null, isError: false };
+  };
 
   for (let r = mapping.dataStartRow; r <= lastRow; r++) {
     if (excludeRows?.has(r)) {

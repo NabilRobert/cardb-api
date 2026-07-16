@@ -310,6 +310,9 @@ Field-specific hints:
   - price_credit (the installment/financing price): labels like "Harga Kredit", "Harga Jual Kredit", "Harga Credit", or "Harga Real Jual Credit". Only map to price_credit if the label explicitly says "Kredit"/"Credit" -- never just because it contains "Jual".
   - price_net: a distinct, separate price category -- labels like "Harga Net" or "Harga Jual (NETT)"/"... NETT". A net-price column must map to price_net, never to price_cash or price_credit, even though its label also contains "Jual".
   - Do not confuse any of the above with a "Market Price" / appraisal / reference-value column, even if that column is itself sub-labeled "Kredit" or "Cash" (e.g. "Market Price (Kredit)") -- that is a separate estimated/reference figure, not the actual sale price, and should not be mapped to price_cash, price_credit, or price_net at all.
+  - "Harga Beli" ("buying price") is the dealership's own purchase/acquisition cost for the unit, not a sale price -- never map it to price_cash, price_credit, or price_net.
+  - "Harga Pricing", "Proposal B2B", "Est. Auction Price", and "Total Estimasi Rekondisi" (reconditioning cost estimate) are not price_cash/price_credit/price_net either -- leave them unmapped.
+  - A sheet may contain two structurally different tables stacked on top of each other, each with its own header row and its own meaning for the same column letters further down the sheet (e.g. one header row defines Q as a credit price, but a second header row further down redefines Q as a net price with no cash/credit split at all for the rows under it). If the sample rows you're given don't match the header row's labels for a price-like column, say so via CLARIFY rather than guessing.
 
 You will be given the header row (column letter: label) and a few sample data rows below it (column letter=value).
 
