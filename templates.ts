@@ -199,6 +199,32 @@ export function extractHeaderCellsAtRow(ws: XLSX.WorkSheet, row: number): Header
   return headerCellsAtRow(ws, row, maxCol);
 }
 
+interface MergeRange {
+  s: { r: number; c: number };
+  e: { r: number; c: number };
+}
+
+/**
+ * If (rowIdx, colIdx) (0-indexed) is a non-anchor cell within a merged
+ * range, returns that merge's own anchor label (the top-left cell's value,
+ * if it looks like a real header value) -- e.g. for the U13:V13 merge, V13
+ * has no value of its own, but this resolves to U13's "Market Price ..."
+ * text. Returns null if the cell isn't part of a merge, if it IS the
+ * anchor itself (nothing to look up), or if the anchor has no real label.
+ */
+function findMergeGroupLabel(ws: XLSX.WorkSheet, merges: MergeRange[] | undefined, rowIdx: number, colIdx: number): string | null {
+  if (!merges) return null;
+  for (const m of merges) {
+    if (rowIdx < m.s.r || rowIdx > m.e.r || colIdx < m.s.c || colIdx > m.e.c) continue;
+    if (rowIdx === m.s.r && colIdx === m.s.c) return null; // this cell IS the anchor
+    const anchorCol = colLetter(m.s.c);
+    const anchorRow = m.s.r + 1; // back to the 1-indexed row convention used elsewhere in this file
+    const anchorValue = getCell(ws, anchorCol, anchorRow).value;
+    return looksLikeHeaderValue(anchorValue) ? (anchorValue as string).trim() : null;
+  }
+  return null;
+}
+
 /**
  * Like extractHeaderCellsAtRow, but for any column whose cell at `row`
  * doesn't parse as a label, also checks the row directly below before
@@ -209,6 +235,13 @@ export function extractHeaderCellsAtRow(ws: XLSX.WorkSheet, row: number): Header
  * single-row scan can end up missing column U there even though it has a
  * real label and real per-row data, depending on exactly how the source
  * file encodes the merged cell.
+ *
+ * When the blank primary cell is itself part of a merged group (like V13
+ * above), the sub-row value alone ("Cash") loses the group's own context --
+ * combine the merge anchor's label with the sub-row value into one string
+ * ("Market Price (last update 30 June 2026) - Cash") instead of using the
+ * sub-row value bare. If the cell isn't part of a merge, behavior is
+ * unchanged from before (sub-row value used as-is).
  *
  * Uses looksLikeHeaderValue (no length cap), not looksLikeLabel -- a real
  * header can be a long descriptive string (e.g. "Harga Jual (NETT) (Last
@@ -230,6 +263,7 @@ export function extractHeaderCellsAtRow(ws: XLSX.WorkSheet, row: number): Header
 export function extractHeaderCellsWithSubRow(ws: XLSX.WorkSheet, row: number): HeaderCell[] {
   const range = getRange(ws);
   const maxCol = Math.min(range.e.c, MAX_HEADER_SCAN_COLS);
+  const merges = ws["!merges"] as MergeRange[] | undefined;
   const cells: HeaderCell[] = [];
   for (let c = 0; c <= maxCol; c++) {
     const col = colLetter(c);
@@ -237,11 +271,15 @@ export function extractHeaderCellsWithSubRow(ws: XLSX.WorkSheet, row: number): H
     let value = primaryCell.value;
     const primaryOk = looksLikeHeaderValue(value);
     let usedFallback = false;
+    let mergeGroupLabel: string | null = null;
     let fallbackCell: { value: unknown; isError: boolean } | null = null;
     if (!primaryOk) {
       fallbackCell = getCell(ws, col, row + 1);
       if (looksLikeHeaderValue(fallbackCell.value)) {
-        value = fallbackCell.value;
+        mergeGroupLabel = findMergeGroupLabel(ws, merges, row - 1, c);
+        value = mergeGroupLabel
+          ? `${mergeGroupLabel} - ${(fallbackCell.value as string).trim()}`
+          : fallbackCell.value;
         usedFallback = true;
       }
     }
@@ -252,11 +290,11 @@ export function extractHeaderCellsWithSubRow(ws: XLSX.WorkSheet, row: number): H
     if (c >= 16 && c <= 48) {
       console.log(
         `[header-scan] row=${row} col=${col} primary=${JSON.stringify(primaryCell.value)} primaryOk=${primaryOk}` +
-          (fallbackCell ? ` fallbackRow=${row + 1} fallback=${JSON.stringify(fallbackCell.value)}` : "") +
+          (fallbackCell ? ` fallbackRow=${row + 1} fallback=${JSON.stringify(fallbackCell.value)} mergeGroupLabel=${JSON.stringify(mergeGroupLabel)}` : "") +
           ` usedFallback=${usedFallback} finalValue=${JSON.stringify(included ? value : null)} included=${included}`
       );
     }
-    if (included) cells.push({ col, value: (value as string).trim() });
+    if (included) cells.push({ col, value: typeof value === "string" ? value.trim() : String(value).trim() });
   }
   console.log(
     `[header-scan] extractHeaderCellsWithSubRow(row=${row}) final list (${cells.length} cols): ` +
