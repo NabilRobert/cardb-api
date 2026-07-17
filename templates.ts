@@ -107,6 +107,21 @@ function looksLikeLabel(value: unknown): boolean {
   return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 40;
 }
 
+// Looser than looksLikeLabel: no length cap, so a genuinely long but real
+// header string (e.g. "Harga Jual (NETT) (Last Update 30 Juni 2026)", 46
+// chars) isn't dropped just for being wordy. Still requires a string --
+// deliberately NOT relaxed to "any non-empty value" -- because this
+// predicate also gates the sub-row fallback (see extractHeaderCellsWithSubRow):
+// when scanning from a row that isn't actually a header (e.g. a sub-header
+// row whose own row+1 is real data), a numeric data value would otherwise
+// get mistaken for a header label. Only used for the human/AI-facing display
+// extraction below, never for detectHeaderRow's row-scoring or
+// computeHeaderFingerprint, where the tighter length cap still guards
+// against a stray long note/data value inflating a row's score.
+function looksLikeHeaderValue(value: unknown): boolean {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function getRange(ws: XLSX.WorkSheet): { s: { r: number; c: number }; e: { r: number; c: number } } {
   const ref = ws["!ref"] as string | undefined;
   return ref ? XLSX.utils.decode_range(ref) : { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
@@ -195,6 +210,17 @@ export function extractHeaderCellsAtRow(ws: XLSX.WorkSheet, row: number): Header
  * real label and real per-row data, depending on exactly how the source
  * file encodes the merged cell.
  *
+ * Uses looksLikeHeaderValue (no length cap), not looksLikeLabel -- a real
+ * header can be a long descriptive string (e.g. "Harga Jual (NETT) (Last
+ * Update 30 Juni 2026)", 46 chars) that the stricter 40-char cap would
+ * wrongly drop. Still requires a string, though: `row` is meant to already
+ * be a known-good header row (auto-detected or human/caller-specified), but
+ * `row + 1` is only a *guess* at a sub-header -- if it's actually a data row
+ * instead (e.g. calling this with a sub-header row as `row`, whose own
+ * `row + 1` is real data), a numeric cell there must NOT be swept in as a
+ * fake header label. Requiring a string for both primary and fallback is
+ * what keeps that guess from laundering data into headers.
+ *
  * Deliberately NOT used for computeHeaderFingerprint / registry matching --
  * only for what's shown to a human (preview) and what's handed to the AI as
  * sample context. Folding the fallback into fingerprinting would change the
@@ -209,17 +235,17 @@ export function extractHeaderCellsWithSubRow(ws: XLSX.WorkSheet, row: number): H
     const col = colLetter(c);
     const primaryCell = getCell(ws, col, row);
     let value = primaryCell.value;
-    const primaryOk = looksLikeLabel(value);
+    const primaryOk = looksLikeHeaderValue(value);
     let usedFallback = false;
     let fallbackCell: { value: unknown; isError: boolean } | null = null;
     if (!primaryOk) {
       fallbackCell = getCell(ws, col, row + 1);
-      if (looksLikeLabel(fallbackCell.value)) {
+      if (looksLikeHeaderValue(fallbackCell.value)) {
         value = fallbackCell.value;
         usedFallback = true;
       }
     }
-    const included = looksLikeLabel(value);
+    const included = looksLikeHeaderValue(value);
     // DEBUG (temporary, for the column-U investigation): the exact point
     // each column's final label decision is made, for the columns in the
     // range this sheet's second table lives in. Remove once resolved.
