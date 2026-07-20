@@ -47,15 +47,19 @@
  * parses and inserts for real. Optional excludeRows (JSON array of sheet
  * row numbers, same numbers the step-2 preview handed back under `_row`/
  * `row_index`) drops specific rows before parsing -- they show up in the
- * response's skipped array with reason "excluded by user".
+ * response's skipped array with reason "excluded by user". Optional
+ * original_mapping (the `mapping` a prior process-sheet call returned) is
+ * diffed against the submitted mapping purely for correction tracking --
+ * see recordTemplateUsage / GET /api/templates -- omitting it just means no
+ * correction signal gets recorded for this call, it doesn't block anything.
  */
 
 import { Router, Request, Response, NextFunction } from "express";
 import multer from "multer";
 import * as XLSX from "xlsx";
-import { insertVehicles, findTemplateByFingerprint, saveImportTemplate } from "../db";
+import { insertVehicles, findTemplateByFingerprint, saveImportTemplate, recordTemplateUsage } from "../db";
 import { requireApiKey } from "../middleware/apiKey";
-import { proposeColumnMapping } from "../ai";
+import { proposeColumnMapping, judgeMappingSemantics } from "../ai";
 import {
   detectHeaderRow,
   extractHeaderCellsAtRow,
@@ -66,7 +70,34 @@ import {
   extractRowsWithMapping,
   getSheetSummaries,
   ColumnMapping,
+  MappableField,
 } from "../templates";
+import { computeAccuracyScore, AccuracyScore } from "../scoring";
+import { VehicleRow, SkippedRow } from "../parser";
+import { FlaggedRow } from "../templates";
+
+/**
+ * SheetPreview -- the response shape of a successful (status: "preview")
+ * process-sheet call. `accuracy` is a computed signal (see scoring.ts):
+ * built from real per-value/per-column checks against the actual extracted
+ * data, not a self-reported AI confidence number -- see computeAccuracyScore's
+ * doc comment for exactly what it checks and why.
+ */
+interface SheetPreview {
+  status: "preview";
+  sheet: string;
+  source: "registry" | "ai_proposed";
+  headerRow: ReturnType<typeof extractHeaderCellsAtRow>;
+  mapping: ColumnMapping;
+  rowCount: number;
+  rawPreview: Record<string, unknown>[];
+  parsedPreview: VehicleRow[];
+  truncated: boolean;
+  skipped: SkippedRow[];
+  flagged: FlaggedRow[];
+  accuracy: AccuracyScore;
+  usage?: unknown;
+}
 
 // Safety cap on the preview response's rawPreview/parsedPreview arrays --
 // distinct from the "always 10" sample this replaces. Real sheets in this
@@ -226,6 +257,23 @@ router.post(
 
       const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName);
 
+      // Step 4 (semantic judge): only for a freshly ai_proposed mapping --
+      // a registry hit already went through a human confirm-mapping once,
+      // so re-judging it every upload would be redundant AI spend. See
+      // ai.ts's judgeMappingSemantics doc comment.
+      let semanticFlags: Map<MappableField, string> | undefined;
+      if (source === "ai_proposed") {
+        const judgeResult = await judgeMappingSemantics(displayHeaderCells, mapping.columns);
+        if (judgeResult.flags.length > 0) {
+          semanticFlags = new Map(judgeResult.flags.map((f) => [f.field as MappableField, f.reason]));
+          console.log(`[process-sheet] semantic judge flagged ${judgeResult.flags.length} field(s):`, JSON.stringify(judgeResult.flags));
+        }
+      }
+
+      // Scored against the full extracted row set, not the possibly-truncated
+      // preview slice below -- more representative of the actual upload.
+      const accuracy = computeAccuracyScore(rows, mapping, semanticFlags);
+
       const truncated = rows.length > MAX_PREVIEW_ROWS;
       const parsedPreview = truncated ? rows.slice(0, MAX_PREVIEW_ROWS) : rows;
       // Built from parsedPreview's own row_index values (not scanned
@@ -233,7 +281,7 @@ router.post(
       // cover exactly the same rows, in the same order.
       const rawPreview = buildRawRowsForIndices(ws, displayHeaderCells, parsedPreview.map((r) => r.row_index));
 
-      res.json({
+      const preview: SheetPreview = {
         status: "preview",
         sheet: sheetName,
         source,
@@ -245,8 +293,10 @@ router.post(
         truncated,
         skipped,
         flagged,
+        accuracy,
         ...(usage ? { usage } : {}),
-      });
+      };
+      res.json(preview);
     } catch (err: any) {
       console.error(err);
       res.status(500).json({ error: "Failed to process the sheet", detail: err.message });
@@ -301,6 +351,22 @@ router.post(
       excludeRows = new Set(parsed);
     }
 
+    // Optional: the mapping that was originally proposed for this same
+    // upload (whatever a prior process-sheet call returned as `mapping`) --
+    // the 3-step flow is stateless (file re-sent every step, see file-level
+    // doc comment), so this is the only way confirm-mapping can know what
+    // changed. Used purely for correction tracking (see recordTemplateUsage);
+    // absence doesn't block confirming, it just means no correction signal
+    // gets recorded for this call.
+    let originalMapping: ColumnMapping | undefined;
+    if (typeof req.body.original_mapping === "string" && req.body.original_mapping.trim()) {
+      try {
+        originalMapping = JSON.parse(req.body.original_mapping);
+      } catch {
+        return res.status(400).json({ error: "'original_mapping' form field must be valid JSON" });
+      }
+    }
+
     const sheetLabel = typeof req.body.sheet_label === "string" && req.body.sheet_label.trim() ? req.body.sheet_label.trim() : sheetName;
 
     try {
@@ -318,6 +384,11 @@ router.post(
 
       await saveImportTemplate(fingerprint, sheetLabel, mapping);
 
+      if (originalMapping) {
+        const corrected = mappingWasCorrected(originalMapping, mapping);
+        await recordTemplateUsage(fingerprint, corrected);
+      }
+
       const { rows, skipped, flagged } = extractRowsWithMapping(ws, mapping, sheetName, excludeRows);
       const { uploadId, inserted } = await insertVehicles(req.file.originalname, rows, skipped.length);
 
@@ -328,5 +399,21 @@ router.post(
     }
   })
 );
+
+/**
+ * True if any field's mapped column in `submitted` changed or was removed
+ * compared to `original` -- a newly-added field (present in submitted but
+ * absent from original) doesn't count, since enriching an already-good
+ * mapping isn't the same signal as fixing a wrong one. Only compares the
+ * base `columns`, not regions -- regions are a structural, human-authored
+ * feature (see ColumnMappingRegion), not something either proposal or
+ * confirmation is expected to churn on per upload.
+ */
+function mappingWasCorrected(original: ColumnMapping, submitted: ColumnMapping): boolean {
+  for (const [field, originalCol] of Object.entries(original.columns)) {
+    if (submitted.columns[field as MappableField] !== originalCol) return true;
+  }
+  return false;
+}
 
 export default router;

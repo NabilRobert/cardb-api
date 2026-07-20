@@ -73,5 +73,7 @@ CREATE TABLE IF NOT EXISTS import_templates (
     header_fingerprint TEXT NOT NULL UNIQUE,
     sheet_label TEXT NOT NULL,
     column_mapping JSONB NOT NULL,
+    times_used INTEGER NOT NULL DEFAULT 0,      -- incremented on every confirm-mapping call for this template
+    times_corrected INTEGER NOT NULL DEFAULT 0, -- incremented when the submitted mapping differs from what was originally proposed (see migration_add_template_usage_tracking.sql)
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

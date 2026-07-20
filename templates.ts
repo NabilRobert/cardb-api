@@ -58,7 +58,7 @@ export interface ColumnMapping {
 }
 
 /** Resolves which column letter (if any) applies to a field at a given sheet row, honoring region overrides. */
-function resolveColumn(mapping: ColumnMapping, field: MappableField, row: number): string | null {
+export function resolveColumn(mapping: ColumnMapping, field: MappableField, row: number): string | null {
   if (mapping.regions) {
     for (const region of mapping.regions) {
       if (row >= region.fromRow && (region.toRow === undefined || row <= region.toRow)) {

@@ -390,3 +390,77 @@ export async function proposeColumnMapping(
 
   return { status: "proposed", columns, usage };
 }
+
+// ---------------------------------------------------------------------------
+// Semantic judge pass (see scoring.ts's computeAccuracyScore). Only run for
+// a freshly ai_proposed mapping, never a registry hit -- a stored template
+// already went through a human confirm-mapping step once, so re-judging it
+// on every single upload would be redundant AI spend for no new signal.
+// Deliberately a SEPARATE call from proposeColumnMapping's own mapping
+// proposal, not folded into it: the two have different failure modes worth
+// keeping independent -- proposeColumnMapping is "which column is this
+// field", this is "does the mapping this call/a human already produced
+// actually make semantic sense", the same kind of judgment call that
+// caught the "Harga Jual (NETT)" price wrongly landing in price_credit
+// earlier (see MAPPING_SYSTEM_PROMPT's price_cash/credit/net hints above --
+// this call is a second line of defense for exactly that failure mode).
+// ---------------------------------------------------------------------------
+
+const SEMANTIC_JUDGE_SYSTEM_PROMPT = `You are reviewing a proposed spreadsheet-column-to-database-field mapping for a used-car dealership's inventory system, looking specifically for mappings that are syntactically plausible but semantically wrong.
+
+You will be given the sheet's header row (column letter: label) and the proposed mapping (field: column letter).
+
+A mapping is semantically wrong when the column's real-world meaning doesn't match the field it's been mapped to, even though nothing about the column letter or format looks broken -- for example:
+- A reference/appraisal/estimated "Market Price" column mapped to price_cash or price_credit (it's a comparison figure, not the actual sale price).
+- A "Harga Beli" (buying/acquisition cost) column mapped to price_cash or price_credit (it's what the dealership paid, not what it's selling for).
+- A net/all-in price column ("Harga Net", "Harga Jual (NETT)") mapped to price_cash or price_credit instead of price_net -- these are different prices, not synonyms.
+- A recon/repair cost estimate column mapped to any price_* field.
+- Any column whose header label clearly describes something other than the field it's mapped to.
+
+Do NOT flag a mapping just because you're unsure -- only flag ones where the header label's own wording clearly conflicts with the field it's mapped to.
+
+Respond with ONLY a JSON object: {"flags": [{"field": "<field>", "reason": "<short reason>"}, ...]} -- empty array if nothing looks wrong. No markdown, no other text.`;
+
+export interface SemanticFlag {
+  field: string;
+  reason: string;
+}
+
+export interface SemanticJudgeResult {
+  flags: SemanticFlag[];
+  usage?: TokenUsage;
+}
+
+export async function judgeMappingSemantics(
+  headerCells: HeaderCell[],
+  columns: Partial<Record<MappableField, string>>
+): Promise<SemanticJudgeResult> {
+  const headerDesc = headerCells.map((h) => `${h.col}: ${h.value}`).join("\n");
+  const mappingDesc = Object.entries(columns).map(([field, col]) => `${field}: ${col}`).join("\n");
+  const userContent = `Header row:\n${headerDesc}\n\nProposed mapping:\n${mappingDesc}`;
+
+  const { text, usage } = await chatCompletion(SEMANTIC_JUDGE_SYSTEM_PROMPT, userContent);
+  console.log("[semantic-judge] raw model response:", text);
+
+  const cleaned = text.replace(/```(?:json)?/gi, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) return { flags: [], usage };
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    return { flags: [], usage };
+  }
+
+  if (!Array.isArray(parsed?.flags)) return { flags: [], usage };
+
+  const flags: SemanticFlag[] = [];
+  for (const entry of parsed.flags) {
+    if (!entry || typeof entry.field !== "string" || typeof entry.reason !== "string") continue;
+    if (!MAPPABLE_FIELD_SET.has(entry.field) || !columns[entry.field as MappableField]) continue; // only ever flag a field that was actually proposed
+    flags.push({ field: entry.field, reason: entry.reason.trim() });
+  }
+
+  return { flags, usage };
+}

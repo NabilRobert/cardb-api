@@ -11,6 +11,7 @@ import uploadRouter from "./upload";
 import uploadsRouter from "./uploads";
 import vehiclesRouter from "./vehicles";
 import askRouter from "./ask";
+import templatesRouter from "./templates";
 
 const router = Router();
 
@@ -20,5 +21,6 @@ router.use("/upload", uploadRouter);
 router.use("/uploads", uploadsRouter);
 router.use("/vehicles", vehiclesRouter);
 router.use("/ask", askRouter);
+router.use("/templates", templatesRouter);
 
 export default router;

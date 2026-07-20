@@ -267,6 +267,8 @@ export interface ImportTemplate {
   header_fingerprint: string;
   sheet_label: string;
   column_mapping: ColumnMapping;
+  times_used: number;
+  times_corrected: number;
   created_at: Date;
 }
 
@@ -275,9 +277,20 @@ export async function findTemplateByFingerprint(fingerprint: string): Promise<Im
   return result.rows[0] ?? null;
 }
 
+// Every template, most-used first -- for GET /api/templates (see
+// routes/templates.ts). Surfaces times_used/times_corrected so a format
+// whose stored mapping keeps needing correction is visible over time.
+export async function listImportTemplates(): Promise<ImportTemplate[]> {
+  const result = await pool.query("SELECT * FROM import_templates ORDER BY times_used DESC, id ASC");
+  return result.rows;
+}
+
 // Upserts on header_fingerprint -- confirming a mapping for a format that's
 // already known (e.g. re-confirming with an edit) updates it in place rather
-// than erroring or creating a duplicate row.
+// than erroring or creating a duplicate row. Does NOT touch times_used/
+// times_corrected -- see recordTemplateUsage, a separate call so the two
+// concerns (what the mapping IS vs. how often it's been used/corrected)
+// don't have to happen atomically together.
 export async function saveImportTemplate(fingerprint: string, sheetLabel: string, mapping: ColumnMapping): Promise<ImportTemplate> {
   const result = await pool.query(
     `INSERT INTO import_templates (header_fingerprint, sheet_label, column_mapping)
@@ -287,6 +300,19 @@ export async function saveImportTemplate(fingerprint: string, sheetLabel: string
     [fingerprint, sheetLabel, JSON.stringify(mapping)]
   );
   return result.rows[0];
+}
+
+// Called once per confirm-mapping call (see routes/upload.ts): increments
+// times_used always, and times_corrected when the human-submitted mapping
+// differs from what was originally proposed for that same upload (see
+// routes/upload.ts's diffMapping).
+export async function recordTemplateUsage(fingerprint: string, corrected: boolean): Promise<void> {
+  await pool.query(
+    `UPDATE import_templates
+     SET times_used = times_used + 1, times_corrected = times_corrected + $2
+     WHERE header_fingerprint = $1`,
+    [fingerprint, corrected ? 1 : 0]
+  );
 }
 
 export async function checkDbConnection(): Promise<boolean> {
