@@ -37,7 +37,7 @@ function formatTimestamp(d: Date): string {
 }
 
 const DATE_ONLY_FIELDS = ["stnk_expiry_date", "purchase_date", "handover_date"] as const;
-const TIMESTAMP_FIELDS = ["created_at", "updated_at", "uploaded_at"] as const;
+const TIMESTAMP_FIELDS = ["created_at", "updated_at", "uploaded_at", "resolved_at", "read_at"] as const;
 
 function formatRowDates<T extends Record<string, any>>(row: T): T {
   const out: any = { ...row };
@@ -389,4 +389,206 @@ export async function checkDbConnection(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// notifications -- see notifications.ts for the nightly job that computes
+// these, scheduler.ts for when it runs, and routes/notifications.ts for the
+// read-side API. Everything below is either a plain CRUD primitive for that
+// API, or a read query the job uses to decide what to insert/escalate/resolve.
+// ---------------------------------------------------------------------------
+
+export type NotificationType = "low_stock" | "stnk_expiry" | "aging_inventory";
+
+export interface NotificationRow {
+  id: number;
+  type: NotificationType;
+  severity: string;
+  message: string;
+  vehicle_id: number | null;
+  brand: string | null;
+  model_trim: string | null;
+  is_read: boolean;
+  is_resolved: boolean;
+  created_at: string;
+  resolved_at: string | null;
+  read_at: string | null;
+}
+
+const NOTIFICATION_COLUMNS = [
+  "id", "type", "severity", "message", "vehicle_id", "brand", "model_trim",
+  "is_read", "is_resolved", "created_at", "resolved_at", "read_at",
+] as const;
+const NOTIFICATION_COLUMNS_SQL = NOTIFICATION_COLUMNS.join(", ");
+
+export interface NotificationListParams {
+  is_read?: boolean;
+  is_resolved?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listNotifications(params: NotificationListParams): Promise<NotificationRow[]> {
+  const clauses: string[] = [];
+  const values: any[] = [];
+  const push = (v: any) => {
+    values.push(v);
+    return `$${values.length}`;
+  };
+  if (params.is_read !== undefined) clauses.push(`is_read = ${push(params.is_read)}`);
+  if (params.is_resolved !== undefined) clauses.push(`is_resolved = ${push(params.is_resolved)}`);
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+
+  const limit = Math.min(Math.max(params.limit ?? 100, 1), 500);
+  const offset = Math.max(params.offset ?? 0, 0);
+
+  const sql = `SELECT ${NOTIFICATION_COLUMNS_SQL} FROM notifications ${whereSql} ORDER BY created_at DESC LIMIT ${push(limit)} OFFSET ${push(offset)}`;
+  const result = await pool.query(sql, values);
+  return result.rows.map(formatRowDates);
+}
+
+// Unread AND unresolved -- a notification that auto-resolved before anyone
+// saw it is no longer an outstanding problem, so it shouldn't inflate a
+// "things you need to look at" badge. See routes/notifications.ts's report
+// for the reasoning.
+export async function countUnreadNotifications(): Promise<number> {
+  const result = await pool.query("SELECT COUNT(*) FROM notifications WHERE is_read = false AND is_resolved = false");
+  return parseInt(result.rows[0].count, 10);
+}
+
+export async function markNotificationRead(id: number): Promise<NotificationRow | null> {
+  const result = await pool.query(
+    `UPDATE notifications SET is_read = true, read_at = now() WHERE id = $1 RETURNING ${NOTIFICATION_COLUMNS_SQL}`,
+    [id]
+  );
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
+export async function findActiveNotificationsByType(type: NotificationType): Promise<NotificationRow[]> {
+  const result = await pool.query(
+    `SELECT ${NOTIFICATION_COLUMNS_SQL} FROM notifications WHERE type = $1 AND is_resolved = false`,
+    [type]
+  );
+  return result.rows.map(formatRowDates);
+}
+
+export interface InsertNotificationInput {
+  type: NotificationType;
+  severity: string;
+  message: string;
+  vehicle_id?: number | null;
+  brand?: string | null;
+  model_trim?: string | null;
+}
+
+export async function insertNotification(input: InsertNotificationInput): Promise<NotificationRow> {
+  const result = await pool.query(
+    `INSERT INTO notifications (type, severity, message, vehicle_id, brand, model_trim)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING ${NOTIFICATION_COLUMNS_SQL}`,
+    [input.type, input.severity, input.message, input.vehicle_id ?? null, input.brand ?? null, input.model_trim ?? null]
+  );
+  return formatRowDates(result.rows[0]);
+}
+
+// Updates severity/message on an already-active notification in place,
+// rather than inserting a duplicate row -- used when a tracked condition
+// worsens (STNK goes from expiring_soon to expired, aging inventory crosses
+// into the next tier) but there's already an open alert for the same
+// vehicle/type.
+export async function escalateNotification(id: number, severity: string, message: string): Promise<void> {
+  await pool.query("UPDATE notifications SET severity = $2, message = $3 WHERE id = $1", [id, severity, message]);
+}
+
+export async function resolveNotification(id: number): Promise<void> {
+  await pool.query(
+    "UPDATE notifications SET is_resolved = true, resolved_at = now() WHERE id = $1 AND is_resolved = false",
+    [id]
+  );
+}
+
+export interface GroupCount {
+  brand: string;
+  model_trim: string;
+  count: number;
+}
+
+export async function getAvailableCountsByGroup(): Promise<GroupCount[]> {
+  const result = await pool.query(
+    `SELECT brand, model_trim, COUNT(*)::int AS count
+     FROM vehicles
+     WHERE status = 'available' AND brand IS NOT NULL AND model_trim IS NOT NULL
+     GROUP BY brand, model_trim`
+  );
+  return result.rows;
+}
+
+export async function getRecentHandoverCountsByGroup(days: number): Promise<GroupCount[]> {
+  const result = await pool.query(
+    `SELECT brand, model_trim, COUNT(*)::int AS count
+     FROM vehicles
+     WHERE brand IS NOT NULL AND model_trim IS NOT NULL
+       AND handover_date >= CURRENT_DATE - make_interval(days => $1::int)
+       AND handover_date <= CURRENT_DATE
+     GROUP BY brand, model_trim`,
+    [days]
+  );
+  return result.rows;
+}
+
+export interface StnkExpiryCandidate {
+  id: number;
+  license_plate: string | null;
+  brand: string | null;
+  model_trim: string | null;
+  days_diff: number; // negative = already expired, 0..windowDays = expiring soon
+}
+
+export async function getStnkExpiryCandidates(windowDays: number): Promise<StnkExpiryCandidate[]> {
+  const result = await pool.query(
+    `SELECT id, license_plate, brand, model_trim, (stnk_expiry_date - CURRENT_DATE)::int AS days_diff
+     FROM vehicles
+     WHERE status = 'available' AND stnk_expiry_date IS NOT NULL
+       AND stnk_expiry_date <= CURRENT_DATE + make_interval(days => $1::int)`,
+    [windowDays]
+  );
+  return result.rows;
+}
+
+// Current status + days-to-expiry for a specific set of vehicles -- used to
+// decide whether an already-active stnk_expiry notification should
+// auto-resolve (see notifications.ts). Deliberately not scoped to
+// status='available' the way getStnkExpiryCandidates is: a booked vehicle's
+// STNK alert should stay open (it hasn't left the lot yet), only a sold one
+// should resolve, per the spec's explicit auto-resolve conditions.
+export async function getVehicleStnkSnapshots(
+  ids: number[]
+): Promise<Map<number, { status: string | null; days_diff: number | null }>> {
+  const map = new Map<number, { status: string | null; days_diff: number | null }>();
+  if (ids.length === 0) return map;
+  const result = await pool.query(
+    `SELECT id, status, (stnk_expiry_date - CURRENT_DATE)::int AS days_diff FROM vehicles WHERE id = ANY($1::int[])`,
+    [ids]
+  );
+  for (const row of result.rows) map.set(row.id, { status: row.status, days_diff: row.days_diff });
+  return map;
+}
+
+export interface AgingInventoryCandidate {
+  id: number;
+  license_plate: string | null;
+  brand: string | null;
+  model_trim: string | null;
+  days_on_lot: number;
+}
+
+export async function getAgingInventoryCandidates(minDays: number): Promise<AgingInventoryCandidate[]> {
+  const result = await pool.query(
+    `SELECT id, license_plate, brand, model_trim, (CURRENT_DATE - purchase_date)::int AS days_on_lot
+     FROM vehicles
+     WHERE status = 'available' AND purchase_date IS NOT NULL
+       AND (CURRENT_DATE - purchase_date) >= $1::int`,
+    [minDays]
+  );
+  return result.rows;
 }

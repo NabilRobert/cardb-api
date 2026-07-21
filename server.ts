@@ -18,12 +18,16 @@
  *   - GET/PATCH/DELETE /api/vehicles/:id   read, edit, or remove a single vehicle
  *   - PATCH /api/vehicles/:id/status   change status with optimistic concurrency (see routes/vehicles.ts)
  *   - GET  /api/ask         answers a natural-language question about stock (see ai.ts)
+ *   - GET  /api/notifications              list in-app alerts (low stock, STNK expiry, aging inventory)
+ *   - GET  /api/notifications/unread-count { unread_count }
+ *   - POST /api/notifications/:id/read     mark one as read
  *
  * Route handlers live in routes/ (one file per resource, see routes/index.ts).
  * Most data routes require middleware/requireAuth.ts (X-API-Key header OR a
  * session cookie from /api/auth/login); /api/uploads still uses
  * middleware/apiKey.ts's X-API-Key-only check directly (not yet moved over
- * to accept a session too). This file only wires the app together.
+ * to accept a session too). This file also starts scheduler.ts's nightly
+ * notifications job (see notifications.ts) alongside the HTTP server.
  *
  * Requires DATABASE_URL, API_KEY, SUMOPOD_API_KEY, ADMIN_USERNAME,
  * ADMIN_PASSWORD_HASH, and SESSION_SECRET in .env.
@@ -34,6 +38,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import * as dotenv from "dotenv";
 import apiRouter from "./routes";
+import { startScheduler } from "./scheduler";
 
 dotenv.config();
 
@@ -89,6 +94,8 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
   console.error("Uncaught exception:", err);
 });
+
+startScheduler();
 
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);

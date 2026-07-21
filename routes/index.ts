@@ -13,6 +13,7 @@ import vehiclesRouter from "./vehicles";
 import askRouter from "./ask";
 import templatesRouter from "./templates";
 import authRouter from "./auth";
+import notificationsRouter from "./notifications";
 
 const router = Router();
 
@@ -24,5 +25,6 @@ router.use("/uploads", uploadsRouter);
 router.use("/vehicles", vehiclesRouter);
 router.use("/ask", askRouter);
 router.use("/templates", templatesRouter);
+router.use("/notifications", notificationsRouter);
 
 export default router;
