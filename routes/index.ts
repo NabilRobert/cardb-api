@@ -14,6 +14,7 @@ import askRouter from "./ask";
 import templatesRouter from "./templates";
 import authRouter from "./auth";
 import notificationsRouter from "./notifications";
+import scheduledReportsRouter from "./scheduledReports";
 
 const router = Router();
 
@@ -26,5 +27,6 @@ router.use("/vehicles", vehiclesRouter);
 router.use("/ask", askRouter);
 router.use("/templates", templatesRouter);
 router.use("/notifications", notificationsRouter);
+router.use("/scheduled-reports", scheduledReportsRouter);
 
 export default router;

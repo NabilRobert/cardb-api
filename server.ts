@@ -18,16 +18,19 @@
  *   - GET/PATCH/DELETE /api/vehicles/:id   read, edit, or remove a single vehicle
  *   - PATCH /api/vehicles/:id/status   change status with optimistic concurrency (see routes/vehicles.ts)
  *   - GET  /api/ask         answers a natural-language question about stock (see ai.ts)
- *   - GET  /api/notifications              list in-app alerts (low stock, STNK expiry, aging inventory)
+ *   - GET  /api/notifications              list in-app alerts (low stock, STNK expiry, aging inventory, scheduled reports)
  *   - GET  /api/notifications/unread-count { unread_count }
  *   - POST /api/notifications/:id/read     mark one as read
+ *   - GET/POST /api/scheduled-reports      list/create recurring "Ask AI" questions (see reports.ts)
+ *   - PATCH/DELETE /api/scheduled-reports/:id   edit (incl. enable/disable) or remove one
  *
  * Route handlers live in routes/ (one file per resource, see routes/index.ts).
  * Most data routes require middleware/requireAuth.ts (X-API-Key header OR a
  * session cookie from /api/auth/login); /api/uploads still uses
  * middleware/apiKey.ts's X-API-Key-only check directly (not yet moved over
- * to accept a session too). This file also starts scheduler.ts's nightly
- * notifications job (see notifications.ts) alongside the HTTP server.
+ * to accept a session too). This file also starts scheduler.ts's background
+ * jobs (nightly notifications, and a per-minute due-check for scheduled
+ * reports) alongside the HTTP server.
  *
  * Requires DATABASE_URL, API_KEY, SUMOPOD_API_KEY, ADMIN_USERNAME,
  * ADMIN_PASSWORD_HASH, and SESSION_SECRET in .env.

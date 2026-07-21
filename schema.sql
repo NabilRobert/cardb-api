@@ -88,6 +88,28 @@ CREATE INDEX IF NOT EXISTS idx_notifications_vehicle_id ON notifications (vehicl
 CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications (is_read);
 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications (created_at DESC);
 
+-- scheduled_reports: recurring "Ask AI" questions (see reports.ts,
+-- scheduler.ts, migration_add_scheduled_reports.sql). schedule is a
+-- standard 5-field cron expression, evaluated against last_run_at (or
+-- created_at if it's never run) to decide when the next occurrence is due.
+CREATE TABLE IF NOT EXISTS scheduled_reports (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    question TEXT NOT NULL,
+    schedule TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    last_run_at TIMESTAMPTZ(3),
+    created_at TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_reports_enabled ON scheduled_reports (enabled);
+
+-- Lets a scheduled_report notification reference which report produced it
+-- (not used for dedup yet -- that's Phase 6 -- just the hook for it).
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS scheduled_report_id INTEGER REFERENCES scheduled_reports(id);
+CREATE INDEX IF NOT EXISTS idx_notifications_scheduled_report_id ON notifications (scheduled_report_id);
+
 -- import_templates: known header-row shapes and how to map their columns to
 -- the vehicles table, so POST /api/upload can recognize a previously-seen
 -- format without re-asking the AI. header_fingerprint is a hash of the

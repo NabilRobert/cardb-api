@@ -37,7 +37,7 @@ function formatTimestamp(d: Date): string {
 }
 
 const DATE_ONLY_FIELDS = ["stnk_expiry_date", "purchase_date", "handover_date"] as const;
-const TIMESTAMP_FIELDS = ["created_at", "updated_at", "uploaded_at", "resolved_at", "read_at"] as const;
+const TIMESTAMP_FIELDS = ["created_at", "updated_at", "uploaded_at", "resolved_at", "read_at", "last_run_at"] as const;
 
 function formatRowDates<T extends Record<string, any>>(row: T): T {
   const out: any = { ...row };
@@ -398,7 +398,7 @@ export async function checkDbConnection(): Promise<boolean> {
 // API, or a read query the job uses to decide what to insert/escalate/resolve.
 // ---------------------------------------------------------------------------
 
-export type NotificationType = "low_stock" | "stnk_expiry" | "aging_inventory";
+export type NotificationType = "low_stock" | "stnk_expiry" | "aging_inventory" | "scheduled_report";
 
 export interface NotificationRow {
   id: number;
@@ -408,6 +408,7 @@ export interface NotificationRow {
   vehicle_id: number | null;
   brand: string | null;
   model_trim: string | null;
+  scheduled_report_id: number | null;
   is_read: boolean;
   is_resolved: boolean;
   created_at: string;
@@ -416,7 +417,7 @@ export interface NotificationRow {
 }
 
 const NOTIFICATION_COLUMNS = [
-  "id", "type", "severity", "message", "vehicle_id", "brand", "model_trim",
+  "id", "type", "severity", "message", "vehicle_id", "brand", "model_trim", "scheduled_report_id",
   "is_read", "is_resolved", "created_at", "resolved_at", "read_at",
 ] as const;
 const NOTIFICATION_COLUMNS_SQL = NOTIFICATION_COLUMNS.join(", ");
@@ -479,14 +480,19 @@ export interface InsertNotificationInput {
   vehicle_id?: number | null;
   brand?: string | null;
   model_trim?: string | null;
+  scheduled_report_id?: number | null;
 }
 
 export async function insertNotification(input: InsertNotificationInput): Promise<NotificationRow> {
   const result = await pool.query(
-    `INSERT INTO notifications (type, severity, message, vehicle_id, brand, model_trim)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO notifications (type, severity, message, vehicle_id, brand, model_trim, scheduled_report_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING ${NOTIFICATION_COLUMNS_SQL}`,
-    [input.type, input.severity, input.message, input.vehicle_id ?? null, input.brand ?? null, input.model_trim ?? null]
+    [
+      input.type, input.severity, input.message,
+      input.vehicle_id ?? null, input.brand ?? null, input.model_trim ?? null,
+      input.scheduled_report_id ?? null,
+    ]
   );
   return formatRowDates(result.rows[0]);
 }
@@ -591,4 +597,101 @@ export async function getAgingInventoryCandidates(minDays: number): Promise<Agin
     [minDays]
   );
   return result.rows;
+}
+
+// ---------------------------------------------------------------------------
+// scheduled_reports -- recurring "Ask AI" questions. See reports.ts for the
+// job that decides what's due and runs it through ai.ts#askQuestion (the
+// same pipeline POST /api/ask uses), scheduler.ts for when that job runs,
+// and routes/scheduledReports.ts for the CRUD API.
+// ---------------------------------------------------------------------------
+
+export interface ScheduledReport {
+  id: number;
+  name: string;
+  question: string;
+  schedule: string;
+  enabled: boolean;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const SCHEDULED_REPORT_COLUMNS = [
+  "id", "name", "question", "schedule", "enabled", "last_run_at", "created_at", "updated_at",
+] as const;
+const SCHEDULED_REPORT_COLUMNS_SQL = SCHEDULED_REPORT_COLUMNS.join(", ");
+
+export async function listScheduledReports(): Promise<ScheduledReport[]> {
+  const result = await pool.query(
+    `SELECT ${SCHEDULED_REPORT_COLUMNS_SQL} FROM scheduled_reports ORDER BY created_at DESC`
+  );
+  return result.rows.map(formatRowDates);
+}
+
+// Used by reports.ts's job -- due-ness itself depends on cron math, which
+// lives there, not here (this file stays SQL-only).
+export async function getEnabledScheduledReports(): Promise<ScheduledReport[]> {
+  const result = await pool.query(
+    `SELECT ${SCHEDULED_REPORT_COLUMNS_SQL} FROM scheduled_reports WHERE enabled = true`
+  );
+  return result.rows.map(formatRowDates);
+}
+
+export interface CreateScheduledReportInput {
+  name: string;
+  question: string;
+  schedule: string;
+  enabled?: boolean;
+}
+
+export async function createScheduledReport(input: CreateScheduledReportInput): Promise<ScheduledReport> {
+  const result = await pool.query(
+    `INSERT INTO scheduled_reports (name, question, schedule, enabled)
+     VALUES ($1, $2, $3, $4)
+     RETURNING ${SCHEDULED_REPORT_COLUMNS_SQL}`,
+    [input.name, input.question, input.schedule, input.enabled ?? true]
+  );
+  return formatRowDates(result.rows[0]);
+}
+
+// Editable via PATCH /api/scheduled-reports/:id. Anything not listed here
+// (id, last_run_at, created_at, ...) is immutable through that route.
+const SCHEDULED_REPORT_EDITABLE_FIELDS = ["name", "question", "schedule", "enabled"] as const;
+
+export function isEditableScheduledReportField(field: string): boolean {
+  return (SCHEDULED_REPORT_EDITABLE_FIELDS as readonly string[]).includes(field);
+}
+
+export async function updateScheduledReport(
+  id: number,
+  fields: Record<string, unknown>
+): Promise<ScheduledReport | null> {
+  const setClauses: string[] = [];
+  const params: any[] = [];
+  const push = (value: any) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+
+  for (const field of SCHEDULED_REPORT_EDITABLE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(fields, field)) {
+      setClauses.push(`${field} = ${push(fields[field])}`);
+    }
+  }
+  if (setClauses.length === 0) return null;
+
+  setClauses.push("updated_at = now()");
+  const sql = `UPDATE scheduled_reports SET ${setClauses.join(", ")} WHERE id = ${push(id)} RETURNING ${SCHEDULED_REPORT_COLUMNS_SQL}`;
+  const result = await pool.query(sql, params);
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
+export async function deleteScheduledReport(id: number): Promise<{ id: number } | null> {
+  const result = await pool.query("DELETE FROM scheduled_reports WHERE id = $1 RETURNING id", [id]);
+  return result.rows[0] ?? null;
+}
+
+export async function markScheduledReportRun(id: number, ranAt: Date): Promise<void> {
+  await pool.query("UPDATE scheduled_reports SET last_run_at = $2 WHERE id = $1", [id, ranAt]);
 }
