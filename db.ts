@@ -88,8 +88,23 @@ export async function insertVehicles(filename: string, rows: VehicleRow[], skipp
   }
 }
 
+// Postgres has no "reorder column" DDL -- buyer_name was added via ALTER
+// TABLE ... ADD COLUMN, so it physically sits at the end of the real table
+// regardless of where schema.sql declares it. An explicit column list (kept
+// in the same order as schema.sql) is what actually controls field order in
+// API responses; every query that returns a full vehicle row uses this
+// instead of SELECT */RETURNING *.
+const VEHICLE_COLUMNS = [
+  "id", "license_plate", "vin", "engine_no", "brand", "model_trim", "year",
+  "transmission", "color", "odometer_km", "stnk_expiry_date", "purchase_date",
+  "handover_date", "status", "reserved_by", "buyer_name", "location", "ownership",
+  "price_cash", "price_credit", "price_net", "max_credit_discount", "notes_raw",
+  "source", "upload_id", "sheet_name", "row_index", "created_at", "updated_at",
+] as const;
+const VEHICLE_COLUMNS_SQL = VEHICLE_COLUMNS.join(", ");
+
 export async function getAllVehicles() {
-  const result = await pool.query("SELECT * FROM vehicles ORDER BY id DESC");
+  const result = await pool.query(`SELECT ${VEHICLE_COLUMNS_SQL} FROM vehicles ORDER BY id DESC`);
   return result.rows.map(formatRowDates);
 }
 
@@ -203,14 +218,14 @@ export async function searchVehicles(query: VehicleSearchParams) {
     dataParams.push(value);
     return `$${dataParams.length}`;
   };
-  const sql = `SELECT * FROM vehicles ${whereSql} ORDER BY ${orderSql} LIMIT ${pushData(limit)} OFFSET ${pushData(offset)}`;
+  const sql = `SELECT ${VEHICLE_COLUMNS_SQL} FROM vehicles ${whereSql} ORDER BY ${orderSql} LIMIT ${pushData(limit)} OFFSET ${pushData(offset)}`;
 
   const result = await pool.query(sql, dataParams);
   return { rows: result.rows.map(formatRowDates), total };
 }
 
 export async function getVehicleById(id: number) {
-  const result = await pool.query("SELECT * FROM vehicles WHERE id = $1", [id]);
+  const result = await pool.query(`SELECT ${VEHICLE_COLUMNS_SQL} FROM vehicles WHERE id = $1`, [id]);
   return result.rows[0] ? formatRowDates(result.rows[0]) : null;
 }
 
@@ -243,7 +258,7 @@ export async function updateVehicle(id: number, fields: Record<string, unknown>)
   if (setClauses.length === 0) return null;
 
   setClauses.push("updated_at = now()");
-  const sql = `UPDATE vehicles SET ${setClauses.join(", ")} WHERE id = ${push(id)} RETURNING *`;
+  const sql = `UPDATE vehicles SET ${setClauses.join(", ")} WHERE id = ${push(id)} RETURNING ${VEHICLE_COLUMNS_SQL}`;
   const result = await pool.query(sql, params);
   return result.rows[0] ? formatRowDates(result.rows[0]) : null;
 }
@@ -289,7 +304,7 @@ export async function updateVehicleStatus(
 
   const idPlaceholder = push(id);
   const updatedAtPlaceholder = push(clientUpdatedAt);
-  const sql = `UPDATE vehicles SET ${setClauses.join(", ")} WHERE id = ${idPlaceholder} AND updated_at = ${updatedAtPlaceholder} RETURNING *`;
+  const sql = `UPDATE vehicles SET ${setClauses.join(", ")} WHERE id = ${idPlaceholder} AND updated_at = ${updatedAtPlaceholder} RETURNING ${VEHICLE_COLUMNS_SQL}`;
 
   const result = await pool.query(sql, params);
   if (result.rows[0]) {
