@@ -107,8 +107,30 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_reports_enabled ON scheduled_reports (e
 
 -- Lets a scheduled_report notification reference which report produced it
 -- (not used for dedup yet -- that's Phase 6 -- just the hook for it).
-ALTER TABLE notifications ADD COLUMN IF NOT EXISTS scheduled_report_id INTEGER REFERENCES scheduled_reports(id);
+-- ON DELETE SET NULL: deleting a scheduled report must always succeed --
+-- its past notifications survive with their content intact, they just lose
+-- the back-reference (there's no GET-notifications-by-report endpoint
+-- depending on it staying populated, unlike report_runs below).
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS scheduled_report_id INTEGER REFERENCES scheduled_reports(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_notifications_scheduled_report_id ON notifications (scheduled_report_id);
+
+-- report_runs: a durable record of every scheduled-report execution,
+-- independent of the notifications table's own retention/read-state
+-- semantics -- this is the Reports page's history, not a borrowed view of
+-- the alerts system. scheduled_report_id is a soft reference (not a FK
+-- constraint) so runs stay reachable via GET /api/scheduled-reports/:id/runs
+-- even after the parent report is deleted -- see migration_add_report_runs.sql.
+CREATE TABLE IF NOT EXISTS report_runs (
+    id SERIAL PRIMARY KEY,
+    scheduled_report_id INTEGER,
+    question TEXT NOT NULL,      -- snapshot of the report's question at run time, not a live join
+    status TEXT NOT NULL,        -- answered | needs_clarification | error
+    summary TEXT NOT NULL,       -- full result text (same content as the notification's message)
+    sql TEXT,                    -- generated SQL, if any (null for needs_clarification/most errors)
+    created_at TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_report_runs_scheduled_report_id ON report_runs (scheduled_report_id, created_at DESC);
 
 -- import_templates: known header-row shapes and how to map their columns to
 -- the vehicles table, so POST /api/upload can recognize a previously-seen

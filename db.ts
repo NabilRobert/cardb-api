@@ -703,3 +703,62 @@ export async function deleteScheduledReport(id: number): Promise<{ id: number } 
 export async function markScheduledReportRun(id: number, ranAt: Date): Promise<void> {
   await pool.query("UPDATE scheduled_reports SET last_run_at = $2 WHERE id = $1", [id, ranAt]);
 }
+
+// ---------------------------------------------------------------------------
+// report_runs -- durable history of every scheduled-report execution,
+// independent of notifications (see reports.ts's runScheduledReportNow,
+// which inserts one of these alongside the bell notification on every run,
+// and routes/scheduledReports.ts's GET /:id/runs).
+// ---------------------------------------------------------------------------
+
+export type ReportRunStatus = "answered" | "needs_clarification" | "error";
+
+export interface ReportRun {
+  id: number;
+  scheduled_report_id: number | null;
+  question: string;
+  status: ReportRunStatus;
+  summary: string;
+  sql: string | null;
+  created_at: string;
+}
+
+const REPORT_RUN_COLUMNS = ["id", "scheduled_report_id", "question", "status", "summary", "sql", "created_at"] as const;
+const REPORT_RUN_COLUMNS_SQL = REPORT_RUN_COLUMNS.join(", ");
+
+export interface InsertReportRunInput {
+  scheduled_report_id: number | null;
+  question: string;
+  status: ReportRunStatus;
+  summary: string;
+  sql?: string | null;
+}
+
+export async function insertReportRun(input: InsertReportRunInput): Promise<ReportRun> {
+  const result = await pool.query(
+    `INSERT INTO report_runs (scheduled_report_id, question, status, summary, sql)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING ${REPORT_RUN_COLUMNS_SQL}`,
+    [input.scheduled_report_id, input.question, input.status, input.summary, input.sql ?? null]
+  );
+  return formatRowDates(result.rows[0]);
+}
+
+export interface ReportRunListParams {
+  limit?: number;
+  offset?: number;
+}
+
+// Deliberately doesn't check that scheduledReportId still exists as a real
+// scheduled_reports row -- see report_runs's soft-reference note in
+// migration_add_report_runs.sql. Returns whatever runs are on file for that
+// id, whether the parent report is alive, deleted, or never existed at all.
+export async function listReportRuns(scheduledReportId: number, params: ReportRunListParams): Promise<ReportRun[]> {
+  const limit = Math.min(Math.max(params.limit ?? 100, 1), 500);
+  const offset = Math.max(params.offset ?? 0, 0);
+  const result = await pool.query(
+    `SELECT ${REPORT_RUN_COLUMNS_SQL} FROM report_runs WHERE scheduled_report_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
+    [scheduledReportId, limit, offset]
+  );
+  return result.rows.map(formatRowDates);
+}

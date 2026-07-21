@@ -21,15 +21,28 @@
  * 404 if no report has that id.
  *
  * DELETE /api/scheduled-reports/:id - delete. Returns { deleted: true, id }.
- * 400 if :id isn't an integer, 404 if no report has that id.
+ * 400 if :id isn't an integer, 404 if no report has that id. Past runs
+ * (report_runs) and past notifications are deliberately NOT deleted along
+ * with the report -- see report_runs's soft-reference note in
+ * migration_add_report_runs.sql. GET /:id/runs stays reachable by this same
+ * id afterward; notifications just lose their scheduled_report_id
+ * back-reference (ON DELETE SET NULL).
  *
  * POST /api/scheduled-reports/:id/run-now - runs the report immediately,
  * regardless of its schedule, via the exact same runScheduledReportNow()
  * function the cron job calls (see reports.ts) -- not a separate
- * implementation. Inserts the resulting notification and updates
- * last_run_at, same as a normal scheduled firing would. Returns the newly
- * created notification. 400 if :id isn't an integer, 404 if no report has
- * that id.
+ * implementation. Inserts the resulting notification AND a report_runs row,
+ * and updates last_run_at, same as a normal scheduled firing would. Returns
+ * the newly created notification. 400 if :id isn't an integer, 404 if no
+ * report has that id.
+ *
+ * GET /api/scheduled-reports/:id/runs - past runs for one report, most
+ * recent first (created_at DESC). limit (default 100, max 500) / offset,
+ * same convention as every other list endpoint. Deliberately does NOT 404
+ * if the report itself no longer exists (see the DELETE note above) --
+ * it's just an empty array if there are no runs for that id, whether
+ * because the id never existed or because the report was since deleted.
+ * 400 if :id isn't an integer.
  */
 
 import { Router, Request, Response } from "express";
@@ -41,6 +54,7 @@ import {
   deleteScheduledReport,
   isEditableScheduledReportField,
   getScheduledReportById,
+  listReportRuns,
 } from "../db";
 import { runScheduledReportNow } from "../reports";
 import { requireAuth } from "../middleware/requireAuth";
@@ -183,6 +197,22 @@ router.post("/:id/run-now", requireAuth, async (req: Request, res: Response) => 
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: "Failed to run scheduled report", detail: err.message });
+  }
+});
+
+router.get("/:id/runs", requireAuth, async (req: Request, res: Response) => {
+  const id = parseId(req.params.id);
+  if (id === null) {
+    return res.status(400).json({ error: "Invalid id: must be a positive integer" });
+  }
+  try {
+    const limit = req.query.limit !== undefined ? Number(req.query.limit) : undefined;
+    const offset = req.query.offset !== undefined ? Number(req.query.offset) : undefined;
+    const runs = await listReportRuns(id, { limit, offset });
+    res.json(runs);
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch report runs", detail: err.message });
   }
 });
 
