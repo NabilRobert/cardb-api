@@ -22,19 +22,18 @@ types.setTypeParser(1082 /* date */, (val) => val);
 
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-// API responses show every date as day-month-year only, with no time
-// component -- these two helpers are the one place that conversion happens,
-// applied to every row before it leaves db.ts (see formatVehicleRow /
-// formatUploadRow below).
+// Plain DATE columns (no time component, e.g. stnk_expiry_date) are shown as
+// day-month-year. TIMESTAMPTZ columns (created_at/updated_at/uploaded_at) are
+// shown as full ISO-8601 UTC strings -- callers that treat updated_at as an
+// optimistic-concurrency token (see updateVehicleStatus below) need
+// sub-day precision, not just a calendar day.
 function formatDateOnly(raw: string): string {
   const [y, m, d] = raw.split("-");
   return `${d}-${m}-${y}`;
 }
 
 function formatTimestamp(d: Date): string {
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${day}-${month}-${d.getUTCFullYear()}`;
+  return d.toISOString();
 }
 
 const DATE_ONLY_FIELDS = ["stnk_expiry_date", "purchase_date", "handover_date"] as const;
@@ -247,6 +246,59 @@ export async function updateVehicle(id: number, fields: Record<string, unknown>)
   const sql = `UPDATE vehicles SET ${setClauses.join(", ")} WHERE id = ${push(id)} RETURNING *`;
   const result = await pool.query(sql, params);
   return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
+const VEHICLE_STATUS_VALUES = ["available", "booked", "sold"] as const;
+export type VehicleStatus = (typeof VEHICLE_STATUS_VALUES)[number];
+
+export function isValidVehicleStatus(value: unknown): value is VehicleStatus {
+  return typeof value === "string" && (VEHICLE_STATUS_VALUES as readonly string[]).includes(value);
+}
+
+export type UpdateVehicleStatusResult =
+  | { outcome: "success"; vehicle: Record<string, any> }
+  | { outcome: "not_found" }
+  | { outcome: "conflict"; current: Record<string, any> };
+
+// Sets status plus whichever name field that target status requires
+// (reserved_by for booked, buyer_name for sold; the route layer has already
+// validated that field is present). The WHERE clause includes the client's
+// last-seen updated_at as an optimistic-concurrency check -- if another
+// request already changed this row, updated_at won't match, zero rows are
+// affected, and the caller can tell "conflict" apart from "no such id" by
+// re-reading the row.
+export async function updateVehicleStatus(
+  id: number,
+  status: VehicleStatus,
+  nameValue: string | undefined,
+  clientUpdatedAt: string
+): Promise<UpdateVehicleStatusResult> {
+  const setClauses: string[] = ["status = $1"];
+  const params: any[] = [status];
+  const push = (value: any) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+
+  if (status === "booked") {
+    setClauses.push(`reserved_by = ${push(nameValue)}`);
+  } else if (status === "sold") {
+    setClauses.push(`buyer_name = ${push(nameValue)}`);
+  }
+  setClauses.push("updated_at = now()");
+
+  const idPlaceholder = push(id);
+  const updatedAtPlaceholder = push(clientUpdatedAt);
+  const sql = `UPDATE vehicles SET ${setClauses.join(", ")} WHERE id = ${idPlaceholder} AND updated_at = ${updatedAtPlaceholder} RETURNING *`;
+
+  const result = await pool.query(sql, params);
+  if (result.rows[0]) {
+    return { outcome: "success", vehicle: formatRowDates(result.rows[0]) };
+  }
+
+  const current = await getVehicleById(id);
+  if (!current) return { outcome: "not_found" };
+  return { outcome: "conflict", current };
 }
 
 export async function deleteVehicle(id: number) {

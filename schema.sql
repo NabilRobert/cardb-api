@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
     handover_date DATE,        -- date the vehicle was handed over to the buyer; source files usually just label this column "HANDOVER"
     status TEXT,               -- available / booked / sold
     reserved_by TEXT,          -- populated when status = booked
+    buyer_name TEXT,           -- populated when status = sold (see migration_add_buyer_name.sql)
     location TEXT,             -- best-effort parsed area/branch, nullable
     ownership TEXT,
     price_cash NUMERIC,
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
     sheet_name TEXT,
     row_index INTEGER,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT now() -- millisecond precision: used as an optimistic-concurrency token, see migration_add_buyer_name.sql
 );
 
 CREATE INDEX IF NOT EXISTS idx_vehicles_brand ON vehicles (brand);

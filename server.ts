@@ -16,6 +16,7 @@
  *   - GET  /api/vehicles    returns every row currently in `vehicles`
  *   - GET  /api/vehicles/search   filtered/sorted/paginated search
  *   - GET/PATCH/DELETE /api/vehicles/:id   read, edit, or remove a single vehicle
+ *   - PATCH /api/vehicles/:id/status   change status with optimistic concurrency (see routes/vehicles.ts)
  *   - GET  /api/ask         answers a natural-language question about stock (see ai.ts)
  *
  * Route handlers live in routes/ (one file per resource, see routes/index.ts).
