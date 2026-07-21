@@ -612,13 +612,14 @@ export interface ScheduledReport {
   question: string;
   schedule: string;
   enabled: boolean;
+  covers: string[];
   last_run_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
 const SCHEDULED_REPORT_COLUMNS = [
-  "id", "name", "question", "schedule", "enabled", "last_run_at", "created_at", "updated_at",
+  "id", "name", "question", "schedule", "enabled", "covers", "last_run_at", "created_at", "updated_at",
 ] as const;
 const SCHEDULED_REPORT_COLUMNS_SQL = SCHEDULED_REPORT_COLUMNS.join(", ");
 
@@ -638,6 +639,17 @@ export async function getEnabledScheduledReports(): Promise<ScheduledReport[]> {
   return result.rows.map(formatRowDates);
 }
 
+// Union of `covers` across every currently-enabled report -- used by
+// notifications.ts to skip creating a new low_stock/stnk_expiry/
+// aging_inventory alert of a type an enabled report already surfaces. See
+// migration_add_scheduled_report_covers.sql.
+export async function getEnabledCoveredTypes(): Promise<Set<string>> {
+  const result = await pool.query(
+    `SELECT DISTINCT unnest(covers) AS type FROM scheduled_reports WHERE enabled = true`
+  );
+  return new Set(result.rows.map((row) => row.type as string));
+}
+
 export async function getScheduledReportById(id: number): Promise<ScheduledReport | null> {
   const result = await pool.query(
     `SELECT ${SCHEDULED_REPORT_COLUMNS_SQL} FROM scheduled_reports WHERE id = $1`,
@@ -651,21 +663,22 @@ export interface CreateScheduledReportInput {
   question: string;
   schedule: string;
   enabled?: boolean;
+  covers?: string[];
 }
 
 export async function createScheduledReport(input: CreateScheduledReportInput): Promise<ScheduledReport> {
   const result = await pool.query(
-    `INSERT INTO scheduled_reports (name, question, schedule, enabled)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO scheduled_reports (name, question, schedule, enabled, covers)
+     VALUES ($1, $2, $3, $4, $5)
      RETURNING ${SCHEDULED_REPORT_COLUMNS_SQL}`,
-    [input.name, input.question, input.schedule, input.enabled ?? true]
+    [input.name, input.question, input.schedule, input.enabled ?? true, input.covers ?? []]
   );
   return formatRowDates(result.rows[0]);
 }
 
 // Editable via PATCH /api/scheduled-reports/:id. Anything not listed here
 // (id, last_run_at, created_at, ...) is immutable through that route.
-const SCHEDULED_REPORT_EDITABLE_FIELDS = ["name", "question", "schedule", "enabled"] as const;
+const SCHEDULED_REPORT_EDITABLE_FIELDS = ["name", "question", "schedule", "enabled", "covers"] as const;
 
 export function isEditableScheduledReportField(field: string): boolean {
   return (SCHEDULED_REPORT_EDITABLE_FIELDS as readonly string[]).includes(field);

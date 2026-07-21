@@ -9,16 +9,25 @@
  * GET /api/scheduled-reports - list all, most recent first (created_at DESC).
  *
  * POST /api/scheduled-reports - create. Body: { name, question, schedule,
- * enabled? }. schedule is a standard 5-field cron expression (e.g.
+ * enabled?, covers? }. schedule is a standard 5-field cron expression (e.g.
  * "0 8 * * *" = daily 08:00 UTC). enabled defaults to true if omitted.
- * 400 if name/question is missing or empty, or schedule isn't a valid cron
- * expression.
+ * covers is an optional array of notification types this report already
+ * surfaces (low_stock, stnk_expiry, aging_inventory) -- while this report
+ * is enabled, notifications.ts skips creating a new individual alert of any
+ * type listed here (see notifications.ts). Defaults to [] (no suppression,
+ * same as today) if omitted. 400 if name/question is missing or empty,
+ * schedule isn't a valid cron expression, or covers contains anything other
+ * than those three values.
  *
  * PATCH /api/scheduled-reports/:id - partial update. Editable: name,
- * question, schedule, enabled (e.g. toggling enabled off/on, or editing the
- * question/schedule). Same validation as create for any field present.
- * 400 if :id isn't an integer or the body has no editable/known fields,
- * 404 if no report has that id.
+ * question, schedule, enabled, covers (e.g. toggling enabled off/on, or
+ * editing the question/schedule/covers). Same validation as create for any
+ * field present. Turning enabled off, deleting the report, or removing a
+ * type from covers all let that type's individual alerts resume on the
+ * notifications job's next run -- no manual cleanup, and nothing already
+ * fired is touched retroactively (see notifications.ts). 400 if :id isn't
+ * an integer or the body has no editable/known fields, 404 if no report has
+ * that id.
  *
  * DELETE /api/scheduled-reports/:id - delete. Returns { deleted: true, id }.
  * 400 if :id isn't an integer, 404 if no report has that id. Past runs
@@ -75,6 +84,16 @@ function isValidCronExpression(schedule: unknown): schedule is string {
   }
 }
 
+// The three Phase 2 notification types a report's `covers` can name.
+// Deliberately excludes "scheduled_report" itself -- that's not something a
+// report can cover.
+const COVERABLE_TYPES = ["low_stock", "stnk_expiry", "aging_inventory"] as const;
+
+function isValidCoversArray(value: unknown): value is string[] {
+  if (!Array.isArray(value)) return false;
+  return value.every((v) => typeof v === "string" && (COVERABLE_TYPES as readonly string[]).includes(v));
+}
+
 router.get("/", requireAuth, async (_req: Request, res: Response) => {
   try {
     const reports = await listScheduledReports();
@@ -89,7 +108,7 @@ router.post("/", requireAuth, async (req: Request, res: Response) => {
   if (typeof req.body !== "object" || req.body === null || Array.isArray(req.body)) {
     return res.status(400).json({ error: "Request body must be a JSON object" });
   }
-  const { name, question, schedule, enabled } = req.body as Record<string, unknown>;
+  const { name, question, schedule, enabled, covers } = req.body as Record<string, unknown>;
 
   if (typeof name !== "string" || name.trim() === "") {
     return res.status(400).json({ error: "name is required and must be non-empty" });
@@ -103,6 +122,9 @@ router.post("/", requireAuth, async (req: Request, res: Response) => {
   if (enabled !== undefined && typeof enabled !== "boolean") {
     return res.status(400).json({ error: "enabled must be a boolean if provided" });
   }
+  if (covers !== undefined && !isValidCoversArray(covers)) {
+    return res.status(400).json({ error: `covers must be an array containing only: ${COVERABLE_TYPES.join(", ")}` });
+  }
 
   try {
     const report = await createScheduledReport({
@@ -110,6 +132,7 @@ router.post("/", requireAuth, async (req: Request, res: Response) => {
       question: question.trim(),
       schedule: (schedule as string).trim(),
       enabled: enabled as boolean | undefined,
+      covers: covers as string[] | undefined,
     });
     res.json(report);
   } catch (err: any) {
@@ -140,13 +163,16 @@ router.patch("/:id", requireAuth, async (req: Request, res: Response) => {
   if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
     return res.status(400).json({ error: "enabled must be a boolean if provided" });
   }
+  if (body.covers !== undefined && !isValidCoversArray(body.covers)) {
+    return res.status(400).json({ error: `covers must be an array containing only: ${COVERABLE_TYPES.join(", ")}` });
+  }
 
   const editableFields = Object.fromEntries(
     Object.entries(body).filter(([key]) => isEditableScheduledReportField(key))
   );
   if (Object.keys(editableFields).length === 0) {
     return res.status(400).json({
-      error: "No editable fields in body. Editable fields: name, question, schedule, enabled",
+      error: "No editable fields in body. Editable fields: name, question, schedule, enabled, covers",
     });
   }
   if (typeof editableFields.name === "string") editableFields.name = editableFields.name.trim();

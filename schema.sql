@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS scheduled_reports (
     question TEXT NOT NULL,
     schedule TEXT NOT NULL,
     enabled BOOLEAN NOT NULL DEFAULT true,
+    covers TEXT[] NOT NULL DEFAULT '{}', -- notification types (low_stock/stnk_expiry/aging_inventory) this report already surfaces; see migration_add_scheduled_report_covers.sql
     last_run_at TIMESTAMPTZ(3),
     created_at TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT now()
