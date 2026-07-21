@@ -42,11 +42,21 @@ const PORT = process.env.PORT || 3000;
 // credentials: true is required for the session cookie (see
 // middleware/session.ts / routes/auth.ts) to be sent on cross-origin
 // requests at all -- but browsers reject Access-Control-Allow-Credentials
-// combined with a wildcard Access-Control-Allow-Origin. CORS_ORIGIN MUST be
-// set to the frontend's exact origin (not "*") for cookie-based login to
-// work from a browser; the X-API-Key path is unaffected either way since it
-// doesn't rely on cookies/credentials at all.
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*", credentials: true }));
+// combined with a wildcard Access-Control-Allow-Origin (confirmed live:
+// "Cannot use wildcard in Access-Control-Allow-Origin when credentials flag
+// is true"). The X-API-Key path is unaffected either way, since it doesn't
+// rely on cookies/credentials at all.
+//
+// CORS_ORIGIN is a comma-separated allow-list (e.g.
+// "http://localhost:5173,https://app.example.com"), not a single value --
+// so adding a real deployed frontend origin later is one env-var edit, not
+// a swap. A bare "*" is still honored as the literal wildcard for anyone
+// who hasn't set this yet, but note it still won't work for the cookie
+// login above; it only keeps the non-credentialed X-API-Key path open the
+// same as before.
+const corsOrigins = (process.env.CORS_ORIGIN || "*").split(",").map((o) => o.trim()).filter(Boolean);
+const corsOriginOption = corsOrigins.length === 1 && corsOrigins[0] === "*" ? "*" : corsOrigins;
+app.use(cors({ origin: corsOriginOption, credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
