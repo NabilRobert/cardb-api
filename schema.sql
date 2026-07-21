@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS notifications (
     vehicle_id INTEGER REFERENCES vehicles(id),   -- set for stnk_expiry/aging_inventory, null for low_stock
     brand TEXT,                                   -- set for low_stock, null for the other two
     model_trim TEXT,                              -- set for low_stock, null for the other two
+    narrative_summary TEXT,                       -- AI-written prose (scheduled_report only), see migration_add_narrative_summary.sql
     is_read BOOLEAN NOT NULL DEFAULT false,
     is_resolved BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
@@ -128,6 +129,7 @@ CREATE TABLE IF NOT EXISTS report_runs (
     status TEXT NOT NULL,        -- answered | needs_clarification | error
     summary TEXT NOT NULL,       -- full result text (same content as the notification's message)
     sql TEXT,                    -- generated SQL, if any (null for needs_clarification/most errors)
+    narrative_summary TEXT,      -- AI-written prose version, only for status='answered'
     created_at TIMESTAMPTZ(3) NOT NULL DEFAULT now()
 );
 

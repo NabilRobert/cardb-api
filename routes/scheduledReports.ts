@@ -42,8 +42,12 @@
  * function the cron job calls (see reports.ts) -- not a separate
  * implementation. Inserts the resulting notification AND a report_runs row,
  * and updates last_run_at, same as a normal scheduled firing would. Returns
- * the newly created notification. 400 if :id isn't an integer, 404 if no
- * report has that id.
+ * the newly created notification, which (like every report_runs row) now
+ * also carries narrative_summary -- an AI-written prose version of the
+ * result, additive alongside the existing mechanical message/summary, only
+ * populated when the run's status is "answered" (null for
+ * needs_clarification/error). See ai.ts#generateReportNarrative. 400 if :id
+ * isn't an integer, 404 if no report has that id.
  *
  * GET /api/scheduled-reports/:id/runs - past runs for one report, most
  * recent first (created_at DESC). limit (default 100, max 500) / offset,

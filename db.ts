@@ -409,6 +409,7 @@ export interface NotificationRow {
   brand: string | null;
   model_trim: string | null;
   scheduled_report_id: number | null;
+  narrative_summary: string | null;
   is_read: boolean;
   is_resolved: boolean;
   created_at: string;
@@ -418,7 +419,7 @@ export interface NotificationRow {
 
 const NOTIFICATION_COLUMNS = [
   "id", "type", "severity", "message", "vehicle_id", "brand", "model_trim", "scheduled_report_id",
-  "is_read", "is_resolved", "created_at", "resolved_at", "read_at",
+  "narrative_summary", "is_read", "is_resolved", "created_at", "resolved_at", "read_at",
 ] as const;
 const NOTIFICATION_COLUMNS_SQL = NOTIFICATION_COLUMNS.join(", ");
 
@@ -481,17 +482,18 @@ export interface InsertNotificationInput {
   brand?: string | null;
   model_trim?: string | null;
   scheduled_report_id?: number | null;
+  narrative_summary?: string | null;
 }
 
 export async function insertNotification(input: InsertNotificationInput): Promise<NotificationRow> {
   const result = await pool.query(
-    `INSERT INTO notifications (type, severity, message, vehicle_id, brand, model_trim, scheduled_report_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO notifications (type, severity, message, vehicle_id, brand, model_trim, scheduled_report_id, narrative_summary)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING ${NOTIFICATION_COLUMNS_SQL}`,
     [
       input.type, input.severity, input.message,
       input.vehicle_id ?? null, input.brand ?? null, input.model_trim ?? null,
-      input.scheduled_report_id ?? null,
+      input.scheduled_report_id ?? null, input.narrative_summary ?? null,
     ]
   );
   return formatRowDates(result.rows[0]);
@@ -733,10 +735,13 @@ export interface ReportRun {
   status: ReportRunStatus;
   summary: string;
   sql: string | null;
+  narrative_summary: string | null;
   created_at: string;
 }
 
-const REPORT_RUN_COLUMNS = ["id", "scheduled_report_id", "question", "status", "summary", "sql", "created_at"] as const;
+const REPORT_RUN_COLUMNS = [
+  "id", "scheduled_report_id", "question", "status", "summary", "sql", "narrative_summary", "created_at",
+] as const;
 const REPORT_RUN_COLUMNS_SQL = REPORT_RUN_COLUMNS.join(", ");
 
 export interface InsertReportRunInput {
@@ -745,14 +750,18 @@ export interface InsertReportRunInput {
   status: ReportRunStatus;
   summary: string;
   sql?: string | null;
+  narrative_summary?: string | null;
 }
 
 export async function insertReportRun(input: InsertReportRunInput): Promise<ReportRun> {
   const result = await pool.query(
-    `INSERT INTO report_runs (scheduled_report_id, question, status, summary, sql)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO report_runs (scheduled_report_id, question, status, summary, sql, narrative_summary)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING ${REPORT_RUN_COLUMNS_SQL}`,
-    [input.scheduled_report_id, input.question, input.status, input.summary, input.sql ?? null]
+    [
+      input.scheduled_report_id, input.question, input.status, input.summary,
+      input.sql ?? null, input.narrative_summary ?? null,
+    ]
   );
   return formatRowDates(result.rows[0]);
 }

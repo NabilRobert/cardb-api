@@ -87,7 +87,11 @@ export interface AskClarification {
  * to-SQL, column-mapping proposal, ...) so the request shape / reasoning
  * settings / error handling only live in one place.
  */
-async function chatCompletion(systemPrompt: string, userContent: string): Promise<{ text: string; usage?: TokenUsage }> {
+async function chatCompletion(
+  systemPrompt: string,
+  userContent: string,
+  maxCompletionTokens = 1000
+): Promise<{ text: string; usage?: TokenUsage }> {
   if (!process.env.SUMOPOD_API_KEY) {
     throw new Error("SUMOPOD_API_KEY is not set");
   }
@@ -105,10 +109,12 @@ async function chatCompletion(systemPrompt: string, userContent: string): Promis
       // writing the visible answer. Reasoning models require
       // max_completion_tokens (max_tokens is the legacy, non-reasoning param
       // and can leave `content` empty here). reasoning_effort is kept low
-      // since neither text-to-SQL for one table nor column-mapping from a
-      // header row needs deep reasoning, and the budget is generous enough
-      // to survive reasoning + a full response either way.
-      max_completion_tokens: 1000,
+      // since neither text-to-SQL for one table, column-mapping from a
+      // header row, nor writing a short prose summary needs deep reasoning,
+      // and the default budget is generous enough to survive reasoning + a
+      // full response either way (callers writing longer prose pass a
+      // higher maxCompletionTokens explicitly).
+      max_completion_tokens: maxCompletionTokens,
       reasoning_effort: "minimal",
       messages: [
         { role: "system", content: systemPrompt },
@@ -288,6 +294,55 @@ export async function askQuestion(question: string): Promise<AskAnswer | AskClar
     rows,
     usage,
   };
+}
+
+const NARRATIVE_SYSTEM_PROMPT = `You write short narrative summaries of a used-car dealership's inventory reports. Each report ran unattended (scheduled or manually triggered) and will be read later, on its own, by someone with no other context and no table of results in front of them -- your prose is the entire report, not a caption or intro for one.
+
+You'll be given the original question and the JSON rows that answered it.
+
+Guidance:
+- Start directly with the findings, in the first sentence. Do not describe yourself, the report, or the process ("this report covers...", "the following summarizes...", "ran unattended...") -- the reader already knows what this is.
+- If there are roughly 5 or fewer rows, you can call out specific vehicles or license plates worth mentioning by name, woven into sentences.
+- If there are more rows than that, summarize instead of listing -- counts, brand or location breakdowns, and anything notably urgent (e.g. an STNK expiring in the next day or two) rather than every row.
+- Write a few short paragraphs of plain, continuous prose, the way it would appear in a written report. Every specific you mention (a plate number, a count, a price) goes inside a full sentence.
+- Absolutely no formatting of any kind: no markdown, no headers, no numbered lists, and no lines that start with a hyphen, dash, bullet, or asterisk. If you're tempted to start a new line for each item, write one sentence per item instead and join them into paragraphs.
+- End on a factual sentence. Never close with an offer, a question, or an invitation for follow-up ("let me know if...", "I can also...", "would you like...", "tell me which filter..."). There is no one to respond to this -- it will only ever be read, not answered.
+- No phrases like "see table below" or "refer to the table above" -- there is no table alongside this text.
+- If there are zero rows, say plainly that nothing matched, in a sentence or two.`;
+
+/**
+ * A second AI call, used ONLY by the scheduled-report execution path
+ * (reports.ts's runScheduledReportNow) -- never by askQuestion/POST
+ * /api/ask, which stays exactly as it was (one call, mechanical summary).
+ * Turns the same rows askQuestion already fetched into a few paragraphs of
+ * real prose. Higher max_completion_tokens than the default chatCompletion
+ * budget since actual prose runs longer than a SQL statement or a JSON
+ * mapping object.
+ */
+export async function generateReportNarrative(
+  question: string,
+  rows: Record<string, unknown>[]
+): Promise<{ text: string; usage?: TokenUsage }> {
+  const userContent = `Question: ${question}\n\nResult rows (JSON):\n${JSON.stringify(rows)}`;
+  const { text, usage } = await chatCompletion(NARRATIVE_SYSTEM_PROMPT, userContent, 1500);
+  console.log("[reports] narrative summary response:", text);
+  return { text: stripTrailingOffer(text.trim()), usage };
+}
+
+// The model reliably closes with a conversational offer ("let me know if...",
+// "tell me which filter and I'll...") despite the system prompt explicitly
+// forbidding it -- prompt wording alone didn't hold up across repeated
+// testing, so this drops any trailing paragraph that reads like one instead
+// of relying on the model to comply. Nothing else about the text is touched.
+const TRAILING_OFFER_PATTERN =
+  /\b(let me know|would you like|do you want|if you('d| would)? (like|want|prefer)|i can (also |)(produce|provide|generate|create|put together|dig into|break (this|it) down)|happy to (help|assist|provide|dig)|tell me which)\b/i;
+
+function stripTrailingOffer(text: string): string {
+  const paragraphs = text.split(/\n\s*\n/);
+  while (paragraphs.length > 1 && TRAILING_OFFER_PATTERN.test(paragraphs[paragraphs.length - 1])) {
+    paragraphs.pop();
+  }
+  return paragraphs.join("\n\n").trim();
 }
 
 // ---------------------------------------------------------------------------

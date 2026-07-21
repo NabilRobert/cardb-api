@@ -11,6 +11,13 @@
  * read-state, see db.ts's insertReportRun). Both happen on every run, one
  * doesn't replace the other.
  *
+ * For an "answered" run only, a second AI call (ai.ts#generateReportNarrative)
+ * writes a prose narrative_summary alongside the existing mechanical
+ * summary/message -- purely additive, askQuestion/POST /api/ask are
+ * untouched. If that second call fails, the run still completes normally
+ * with narrative_summary left null; a broken narrative call never turns a
+ * successful answer into an "error" run.
+ *
  * runScheduledReportsJob() is what scheduler.ts calls every minute.
  * runScheduledReportNow() is the single-report primitive it's built on --
  * also called directly by POST /api/scheduled-reports/:id/run-now (see
@@ -19,7 +26,7 @@
  */
 
 import { CronExpressionParser } from "cron-parser";
-import { askQuestion } from "./ai";
+import { askQuestion, generateReportNarrative } from "./ai";
 import {
   ScheduledReport,
   NotificationRow,
@@ -46,6 +53,19 @@ function isDue(report: ScheduledReport, now: Date): boolean {
   }
 }
 
+// Wraps the second (narrative) AI call so a failure there never turns an
+// otherwise-successful "answered" run into an "error" one -- narrative_summary
+// just stays null, same as if it were never attempted.
+async function generateNarrativeSafely(question: string, rows: Record<string, unknown>[]): Promise<string | null> {
+  try {
+    const { text } = await generateReportNarrative(question, rows);
+    return text || null;
+  } catch (err) {
+    console.error("[reports] narrative summary generation failed:", err);
+    return null;
+  }
+}
+
 // Runs one report right now, regardless of its schedule -- used both by the
 // due-check loop below and by the manual POST /:id/run-now trigger. Always
 // inserts exactly one notification AND one report_runs row (same content),
@@ -57,6 +77,7 @@ export async function runScheduledReportNow(report: ScheduledReport, now: Date =
   let runStatus: ReportRunStatus;
   let runSummary: string;
   let runSql: string | null = null;
+  let runNarrative: string | null = null;
 
   try {
     const result = await askQuestion(report.question);
@@ -75,11 +96,15 @@ export async function runScheduledReportNow(report: ScheduledReport, now: Date =
       runStatus = "answered";
       runSummary = result.summary;
       runSql = result.sql;
+      // Additive only -- narrative_summary is null on failure, never blocks
+      // or alters the mechanical summary/notification above.
+      runNarrative = await generateNarrativeSafely(report.question, result.rows);
       notification = await insertNotification({
         type: "scheduled_report",
         severity: "info",
         message: runSummary,
         scheduled_report_id: report.id,
+        narrative_summary: runNarrative,
       });
     }
   } catch (err: any) {
@@ -99,6 +124,7 @@ export async function runScheduledReportNow(report: ScheduledReport, now: Date =
     status: runStatus,
     summary: runSummary,
     sql: runSql,
+    narrative_summary: runNarrative,
   });
   await markScheduledReportRun(report.id, now);
   return notification;
