@@ -1,9 +1,12 @@
 /**
  * middleware/apiKey.ts
  *
- * Requires the API key in an X-API-Key header. Applied to every /api/* route
- * except /api/config and /api/health, which are intentionally reachable
- * without a key.
+ * Requires the API key in an X-API-Key header. Still applied directly to
+ * /api/uploads (upload history) -- everything else that used to import this
+ * directly (/api/vehicles*, /api/upload*, /api/ask, /api/templates) now
+ * goes through middleware/requireAuth.ts instead, which accepts this same
+ * check OR a session cookie from the shared web-app login (routes/auth.ts).
+ * /api/config and /api/health stay reachable without either.
  */
 
 import { Request, Response, NextFunction } from "express";

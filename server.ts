@@ -6,6 +6,9 @@
  * CORS_ORIGIN below) -- this process serves no frontend assets of its own.
  *   - GET  /api/config      returns the API key so the frontend can auth itself (local/testing convenience)
  *   - GET  /api/health      liveness + DB connectivity check (no auth)
+ *   - POST /api/auth/login  shared web-app login (routes/auth.ts) -- sets a session cookie, separate from the API key
+ *   - POST /api/auth/logout clears the session cookie
+ *   - GET  /api/auth/me     whether the current request has a valid session
  *   - POST /api/upload                    step 1 of 3: list a workbook's sheets, nothing processed yet
  *   - POST /api/upload/process-sheet      step 2 of 3: parse a chosen sheet, return a preview, nothing inserted yet
  *   - POST /api/upload/confirm-mapping    step 3 of 3: commit -- save the mapping and insert
@@ -15,14 +18,19 @@
  *   - GET/PATCH/DELETE /api/vehicles/:id   read, edit, or remove a single vehicle
  *   - GET  /api/ask         answers a natural-language question about stock (see ai.ts)
  *
- * Route handlers live in routes/ (one file per resource, see routes/index.ts),
- * with shared auth in middleware/apiKey.ts -- this file only wires the app together.
+ * Route handlers live in routes/ (one file per resource, see routes/index.ts).
+ * Most data routes require middleware/requireAuth.ts (X-API-Key header OR a
+ * session cookie from /api/auth/login); /api/uploads still uses
+ * middleware/apiKey.ts's X-API-Key-only check directly (not yet moved over
+ * to accept a session too). This file only wires the app together.
  *
- * Requires DATABASE_URL, API_KEY, and SUMOPOD_API_KEY in .env.
+ * Requires DATABASE_URL, API_KEY, SUMOPOD_API_KEY, ADMIN_USERNAME,
+ * ADMIN_PASSWORD_HASH, and SESSION_SECRET in .env.
  */
 
 import express from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import * as dotenv from "dotenv";
 import apiRouter from "./routes";
 
@@ -31,8 +39,16 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+// credentials: true is required for the session cookie (see
+// middleware/session.ts / routes/auth.ts) to be sent on cross-origin
+// requests at all -- but browsers reject Access-Control-Allow-Credentials
+// combined with a wildcard Access-Control-Allow-Origin. CORS_ORIGIN MUST be
+// set to the frontend's exact origin (not "*") for cookie-based login to
+// work from a browser; the X-API-Key path is unaffected either way since it
+// doesn't rely on cookies/credentials at all.
+app.use(cors({ origin: process.env.CORS_ORIGIN || "*", credentials: true }));
 app.use(express.json());
+app.use(cookieParser());
 
 app.use("/api", apiRouter);
 

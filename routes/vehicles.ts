@@ -58,7 +58,7 @@ import {
   isEditableVehicleField,
   deleteVehicle,
 } from "../db";
-import { requireApiKey } from "../middleware/apiKey";
+import { requireAuth } from "../middleware/requireAuth";
 
 const router = Router();
 
@@ -66,7 +66,7 @@ function parseId(raw: string): number | null {
   return /^\d+$/.test(raw) ? Number(raw) : null;
 }
 
-router.get("/", requireApiKey, async (_req: Request, res: Response) => {
+router.get("/", requireAuth, async (_req: Request, res: Response) => {
   try {
     const vehicles = await getAllVehicles();
     res.json(vehicles);
@@ -76,7 +76,7 @@ router.get("/", requireApiKey, async (_req: Request, res: Response) => {
   }
 });
 
-router.get("/search", requireApiKey, async (req: Request, res: Response) => {
+router.get("/search", requireAuth, async (req: Request, res: Response) => {
   try {
     const result = await searchVehicles(req.query);
     res.json(result);
@@ -86,7 +86,7 @@ router.get("/search", requireApiKey, async (req: Request, res: Response) => {
   }
 });
 
-router.get("/:id", requireApiKey, async (req: Request, res: Response) => {
+router.get("/:id", requireAuth, async (req: Request, res: Response) => {
   const id = parseId(req.params.id);
   if (id === null) {
     return res.status(400).json({ error: "Invalid id: must be a positive integer" });
@@ -103,7 +103,7 @@ router.get("/:id", requireApiKey, async (req: Request, res: Response) => {
   }
 });
 
-router.patch("/:id", requireApiKey, async (req: Request, res: Response) => {
+router.patch("/:id", requireAuth, async (req: Request, res: Response) => {
   const id = parseId(req.params.id);
   if (id === null) {
     return res.status(400).json({ error: "Invalid id: must be a positive integer" });
@@ -133,7 +133,7 @@ router.patch("/:id", requireApiKey, async (req: Request, res: Response) => {
   }
 });
 
-router.delete("/:id", requireApiKey, async (req: Request, res: Response) => {
+router.delete("/:id", requireAuth, async (req: Request, res: Response) => {
   const id = parseId(req.params.id);
   if (id === null) {
     return res.status(400).json({ error: "Invalid id: must be a positive integer" });

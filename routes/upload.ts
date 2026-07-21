@@ -58,7 +58,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import multer from "multer";
 import * as XLSX from "xlsx";
 import { insertVehicles, findTemplateByFingerprint, saveImportTemplate, recordTemplateUsage } from "../db";
-import { requireApiKey } from "../middleware/apiKey";
+import { requireAuth } from "../middleware/requireAuth";
 import { proposeColumnMapping, judgeMappingSemantics } from "../ai";
 import {
   detectHeaderRow,
@@ -140,7 +140,7 @@ function parseOptionalInt(raw: unknown): number | undefined | null {
 
 router.post(
   "/",
-  requireApiKey,
+  requireAuth,
   upload.single("file"),
   asyncRoute(async (req, res) => {
     if (!req.file) {
@@ -162,7 +162,7 @@ router.post(
 
 router.post(
   "/process-sheet",
-  requireApiKey,
+  requireAuth,
   upload.single("file"),
   asyncRoute(async (req, res) => {
     if (!req.file) {
@@ -308,7 +308,7 @@ router.post(
 
 router.post(
   "/confirm-mapping",
-  requireApiKey,
+  requireAuth,
   upload.single("file"),
   asyncRoute(async (req, res) => {
     if (!req.file) {

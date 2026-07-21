@@ -12,11 +12,11 @@
 
 import { Router, Request, Response } from "express";
 import { listImportTemplates } from "../db";
-import { requireApiKey } from "../middleware/apiKey";
+import { requireAuth } from "../middleware/requireAuth";
 
 const router = Router();
 
-router.get("/", requireApiKey, async (_req: Request, res: Response) => {
+router.get("/", requireAuth, async (_req: Request, res: Response) => {
   try {
     const templates = await listImportTemplates();
     const withRate = templates.map((t) => ({

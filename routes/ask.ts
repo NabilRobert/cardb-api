@@ -8,12 +8,12 @@
 import { Router, Request, Response } from "express";
 import multer from "multer";
 import { askQuestion } from "../ai";
-import { requireApiKey } from "../middleware/apiKey";
+import { requireAuth } from "../middleware/requireAuth";
 
 const upload = multer();
 const router = Router();
 
-router.post("/", requireApiKey, upload.none(), async (req: Request, res: Response) => {
+router.post("/", requireAuth, upload.none(), async (req: Request, res: Response) => {
   const question = typeof req.body.question === "string" ? req.body.question.trim() : "";
   if (!question) {
     return res.status(400).json({ error: "Missing 'question' form field" });
