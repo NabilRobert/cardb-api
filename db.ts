@@ -638,6 +638,14 @@ export async function getEnabledScheduledReports(): Promise<ScheduledReport[]> {
   return result.rows.map(formatRowDates);
 }
 
+export async function getScheduledReportById(id: number): Promise<ScheduledReport | null> {
+  const result = await pool.query(
+    `SELECT ${SCHEDULED_REPORT_COLUMNS_SQL} FROM scheduled_reports WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
 export interface CreateScheduledReportInput {
   name: string;
   question: string;

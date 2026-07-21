@@ -22,6 +22,14 @@
  *
  * DELETE /api/scheduled-reports/:id - delete. Returns { deleted: true, id }.
  * 400 if :id isn't an integer, 404 if no report has that id.
+ *
+ * POST /api/scheduled-reports/:id/run-now - runs the report immediately,
+ * regardless of its schedule, via the exact same runScheduledReportNow()
+ * function the cron job calls (see reports.ts) -- not a separate
+ * implementation. Inserts the resulting notification and updates
+ * last_run_at, same as a normal scheduled firing would. Returns the newly
+ * created notification. 400 if :id isn't an integer, 404 if no report has
+ * that id.
  */
 
 import { Router, Request, Response } from "express";
@@ -32,7 +40,9 @@ import {
   updateScheduledReport,
   deleteScheduledReport,
   isEditableScheduledReportField,
+  getScheduledReportById,
 } from "../db";
+import { runScheduledReportNow } from "../reports";
 import { requireAuth } from "../middleware/requireAuth";
 
 const router = Router();
@@ -155,6 +165,24 @@ router.delete("/:id", requireAuth, async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: "Failed to delete scheduled report", detail: err.message });
+  }
+});
+
+router.post("/:id/run-now", requireAuth, async (req: Request, res: Response) => {
+  const id = parseId(req.params.id);
+  if (id === null) {
+    return res.status(400).json({ error: "Invalid id: must be a positive integer" });
+  }
+  try {
+    const report = await getScheduledReportById(id);
+    if (!report) {
+      return res.status(404).json({ error: `No scheduled report found with id ${id}` });
+    }
+    const notification = await runScheduledReportNow(report);
+    res.json(notification);
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to run scheduled report", detail: err.message });
   }
 });
 

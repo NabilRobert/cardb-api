@@ -8,13 +8,22 @@
  * result as a notification (type "scheduled_report", see db.ts's
  * insertNotification).
  *
- * runScheduledReportsJob() is what scheduler.ts calls every minute. It's
- * also safe to call directly (e.g. for manual testing).
+ * runScheduledReportsJob() is what scheduler.ts calls every minute.
+ * runScheduledReportNow() is the single-report primitive it's built on --
+ * also called directly by POST /api/scheduled-reports/:id/run-now (see
+ * routes/scheduledReports.ts) so the manual-trigger and cron paths are
+ * exactly the same code, never two implementations to keep in sync.
  */
 
 import { CronExpressionParser } from "cron-parser";
 import { askQuestion } from "./ai";
-import { ScheduledReport, getEnabledScheduledReports, markScheduledReportRun, insertNotification } from "./db";
+import {
+  ScheduledReport,
+  NotificationRow,
+  getEnabledScheduledReports,
+  markScheduledReportRun,
+  insertNotification,
+} from "./db";
 
 // A report is due once the next scheduled occurrence after its last run (or
 // after its creation, if it's never run) has passed. Evaluated in UTC so
@@ -32,20 +41,26 @@ function isDue(report: ScheduledReport, now: Date): boolean {
   }
 }
 
-async function runReport(report: ScheduledReport, now: Date): Promise<void> {
+// Runs one report right now, regardless of its schedule -- used both by the
+// due-check loop below and by the manual POST /:id/run-now trigger. Always
+// inserts exactly one notification and advances last_run_at, whatever the
+// outcome, so a persistently broken question surfaces once per invocation
+// rather than being retried indefinitely.
+export async function runScheduledReportNow(report: ScheduledReport, now: Date = new Date()): Promise<NotificationRow> {
+  let notification: NotificationRow;
   try {
     const result = await askQuestion(report.question);
     if (result.status === "needs_clarification") {
       // Flagged with a distinct severity (not "info") specifically so it
       // doesn't fail silently -- someone needs to reword the question.
-      await insertNotification({
+      notification = await insertNotification({
         type: "scheduled_report",
         severity: "needs_clarification",
         message: `Scheduled report "${report.name}" couldn't run: ${result.message} (the question needs to be reworded)`,
         scheduled_report_id: report.id,
       });
     } else {
-      await insertNotification({
+      notification = await insertNotification({
         type: "scheduled_report",
         severity: "info",
         message: result.summary,
@@ -53,18 +68,15 @@ async function runReport(report: ScheduledReport, now: Date): Promise<void> {
       });
     }
   } catch (err: any) {
-    await insertNotification({
+    notification = await insertNotification({
       type: "scheduled_report",
       severity: "error",
       message: `Scheduled report "${report.name}" failed to run: ${err.message}`,
       scheduled_report_id: report.id,
     });
-  } finally {
-    // Advances last_run_at regardless of outcome, so a persistently broken
-    // question surfaces once per scheduled occurrence rather than being
-    // retried every minute until fixed.
-    await markScheduledReportRun(report.id, now);
   }
+  await markScheduledReportRun(report.id, now);
+  return notification;
 }
 
 export interface ReportsJobResult {
@@ -77,7 +89,7 @@ export async function runScheduledReportsJob(): Promise<ReportsJobResult> {
   const reports = await getEnabledScheduledReports();
   const due = reports.filter((r) => isDue(r, now));
   for (const report of due) {
-    await runReport(report, now);
+    await runScheduledReportNow(report, now);
   }
   return { checked: reports.length, ran: due.length };
 }
