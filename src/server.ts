@@ -33,7 +33,11 @@
  * reports) alongside the HTTP server.
  *
  * Requires DATABASE_URL, API_KEY, SUMOPOD_API_KEY, ADMIN_USERNAME,
- * ADMIN_PASSWORD_HASH, and SESSION_SECRET in .env.
+ * ADMIN_PASSWORD_HASH, and SESSION_SECRET in .env. SUMMARIZER_API_KEY (and
+ * optionally SUMMARIZER_MODEL, defaults to "gpt-5") is required for the
+ * scheduled-report narrative summarizer (see services/ai.ts's
+ * generateReportNarrative) -- if unset, that one call fails and
+ * narrative_summary just stays null, nothing else is affected.
  */
 
 import express from "express";

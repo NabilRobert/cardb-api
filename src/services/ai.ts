@@ -84,36 +84,45 @@ export interface AskClarification {
 
 /**
  * Low-level SumoPod chat call shared by every AI feature in this file (text-
- * to-SQL, column-mapping proposal, ...) so the request shape / reasoning
- * settings / error handling only live in one place.
+ * to-SQL, column-mapping proposal, the scheduled-report narrative
+ * summarizer, ...) so the request shape / reasoning settings / error
+ * handling only live in one place. Same provider/base URL (SUMOPOD_URL) for
+ * every caller -- apiKey/model default to the main SUMOPOD_API_KEY/MODEL,
+ * but a caller can point this at a different key+model (see
+ * generateReportNarrative, which uses SUMMARIZER_API_KEY/SUMMARIZER_MODEL)
+ * without touching anything about the request/response handling below.
  */
 async function chatCompletion(
   systemPrompt: string,
   userContent: string,
-  maxCompletionTokens = 1000
+  maxCompletionTokens = 1000,
+  apiKey: string | undefined = process.env.SUMOPOD_API_KEY,
+  model: string = MODEL
 ): Promise<{ text: string; usage?: TokenUsage }> {
-  if (!process.env.SUMOPOD_API_KEY) {
-    throw new Error("SUMOPOD_API_KEY is not set");
+  if (!apiKey) {
+    throw new Error("No API key configured for this AI call");
   }
 
   const res = await fetch(SUMOPOD_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.SUMOPOD_API_KEY}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: MODEL,
+      model,
       temperature: 0,
-      // gpt-5-mini spends part of its token budget on hidden reasoning before
-      // writing the visible answer. Reasoning models require
-      // max_completion_tokens (max_tokens is the legacy, non-reasoning param
-      // and can leave `content` empty here). reasoning_effort is kept low
-      // since neither text-to-SQL for one table, column-mapping from a
-      // header row, nor writing a short prose summary needs deep reasoning,
-      // and the default budget is generous enough to survive reasoning + a
-      // full response either way (callers writing longer prose pass a
-      // higher maxCompletionTokens explicitly).
+      // Every model used here (gpt-5-mini for SQL-gen/mapping/judging, gpt-5
+      // for the narrative summarizer) spends part of its token budget on
+      // hidden reasoning before writing the visible answer. Reasoning models
+      // require max_completion_tokens (max_tokens is the legacy, non-
+      // reasoning param and can leave `content` empty here). reasoning_effort
+      // is kept low since none of these tasks -- text-to-SQL for one table,
+      // column-mapping from a header row, or writing a prose summary of rows
+      // that are already fetched -- needs deep reasoning, and the default
+      // budget is generous enough to survive reasoning + a full response
+      // either way (callers writing longer prose pass a higher
+      // maxCompletionTokens explicitly).
       max_completion_tokens: maxCompletionTokens,
       reasoning_effort: "minimal",
       messages: [
@@ -300,6 +309,11 @@ const NARRATIVE_SYSTEM_PROMPT = `You write short narrative summaries of a used-c
 
 You'll be given the original question and the JSON rows that answered it.
 
+Grounding (most important rule -- follow this above all the style guidance below):
+- Only rephrase and aggregate what is actually present in the JSON rows you were given. Never introduce a vehicle, license plate, count, price, date, brand, or any other fact that isn't literally in that data, and never guess, estimate, or infer a fact that isn't there.
+- Do not use outside knowledge about vehicles, this dealership, or typical inventory to fill in anything the rows don't state.
+- If the rows don't contain enough information to say something you'd otherwise want to say, leave it out rather than inventing it.
+
 Guidance:
 - Start directly with the findings, in the first sentence. Do not describe yourself, the report, or the process ("this report covers...", "the following summarizes...", "ran unattended...") -- the reader already knows what this is.
 - If there are roughly 5 or fewer rows, you can call out specific vehicles or license plates worth mentioning by name, woven into sentences.
@@ -313,18 +327,33 @@ Guidance:
 /**
  * A second AI call, used ONLY by the scheduled-report execution path
  * (reports.ts's runScheduledReportNow) -- never by askQuestion/POST
- * /api/ask, which stays exactly as it was (one call, mechanical summary).
- * Turns the same rows askQuestion already fetched into a few paragraphs of
- * real prose. Higher max_completion_tokens than the default chatCompletion
- * budget since actual prose runs longer than a SQL statement or a JSON
- * mapping object.
+ * /api/ask, which stays exactly as it was (one call, mechanical summary,
+ * gpt-5-mini). Turns the same rows askQuestion already fetched into a few
+ * paragraphs of real prose.
+ *
+ * Deliberately a different key/model from every other call in this file:
+ * SUMMARIZER_API_KEY/SUMMARIZER_MODEL (falls back to "gpt-5" if the model
+ * env var isn't set), same SUMOPOD_URL/provider. Higher max_completion_tokens
+ * than the default chatCompletion budget since actual prose runs longer
+ * than a SQL statement or a JSON mapping object.
+ *
+ * Callers (reports.ts's generateNarrativeSafely) are expected to catch
+ * failures here and leave narrative_summary null rather than fail the run --
+ * this function itself doesn't swallow errors, so a missing/invalid
+ * SUMMARIZER_API_KEY throws same as any other chatCompletion failure would.
  */
 export async function generateReportNarrative(
   question: string,
   rows: Record<string, unknown>[]
 ): Promise<{ text: string; usage?: TokenUsage }> {
   const userContent = `Question: ${question}\n\nResult rows (JSON):\n${JSON.stringify(rows)}`;
-  const { text, usage } = await chatCompletion(NARRATIVE_SYSTEM_PROMPT, userContent, 1500);
+  const { text, usage } = await chatCompletion(
+    NARRATIVE_SYSTEM_PROMPT,
+    userContent,
+    1500,
+    process.env.SUMMARIZER_API_KEY,
+    process.env.SUMMARIZER_MODEL || "gpt-5"
+  );
   console.log("[reports] narrative summary response:", text);
   return { text: stripTrailingOffer(text.trim()), usage };
 }
