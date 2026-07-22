@@ -9,8 +9,10 @@
  * GET /api/scheduled-reports - list all, most recent first (created_at DESC).
  *
  * POST /api/scheduled-reports - create. Body: { name, question, schedule,
- * enabled?, covers? }. schedule is a standard 5-field cron expression (e.g.
- * "0 8 * * *" = daily 08:00 UTC). enabled defaults to true if omitted.
+ * enabled?, covers? }. schedule is a standard 5-field cron expression,
+ * evaluated against Asia/Jakarta (WIB, UTC+7, no DST) -- e.g. "0 8 * * *"
+ * means daily 08:00 WIB, not UTC (see reports.ts's isDue). enabled defaults
+ * to true if omitted.
  * covers is an optional array of notification types this report already
  * surfaces (low_stock, stnk_expiry, aging_inventory) -- while this report
  * is enabled, notifications.ts skips creating a new individual alert of any

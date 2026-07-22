@@ -38,12 +38,15 @@ import {
 } from "../db";
 
 // A report is due once the next scheduled occurrence after its last run (or
-// after its creation, if it's never run) has passed. Evaluated in UTC so
-// behavior doesn't depend on the server process's local timezone setting.
+// after its creation, if it's never run) has passed. Evaluated against
+// Asia/Jakarta (WIB, UTC+7, no DST) rather than UTC or the server process's
+// local timezone -- this dealership is Jakarta-based, so "0 8 * * *" means
+// 8am WIB directly, the way a Jakarta-based user typing that expression
+// would expect, not 8am UTC (3pm WIB).
 function isDue(report: ScheduledReport, now: Date): boolean {
   const baseline = new Date(report.last_run_at ?? report.created_at);
   try {
-    const interval = CronExpressionParser.parse(report.schedule, { currentDate: baseline, tz: "UTC" });
+    const interval = CronExpressionParser.parse(report.schedule, { currentDate: baseline, tz: "Asia/Jakarta" });
     return interval.next().toDate() <= now;
   } catch {
     // routes/scheduledReports.ts validates the cron expression on
