@@ -7,7 +7,7 @@
 
 import { Router, Request, Response } from "express";
 import multer from "multer";
-import { askQuestion } from "../ai";
+import { askQuestion } from "../services/ai";
 import { requireAuth } from "../middleware/requireAuth";
 
 const upload = multer();

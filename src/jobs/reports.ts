@@ -26,7 +26,7 @@
  */
 
 import { CronExpressionParser } from "cron-parser";
-import { askQuestion, generateReportNarrative } from "./ai";
+import { askQuestion, generateReportNarrative } from "../services/ai";
 import {
   ScheduledReport,
   NotificationRow,
@@ -35,7 +35,7 @@ import {
   markScheduledReportRun,
   insertNotification,
   insertReportRun,
-} from "./db";
+} from "../db";
 
 // A report is due once the next scheduled occurrence after its last run (or
 // after its creation, if it's never run) has passed. Evaluated in UTC so

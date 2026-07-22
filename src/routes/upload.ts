@@ -59,7 +59,7 @@ import multer from "multer";
 import * as XLSX from "xlsx";
 import { insertVehicles, findTemplateByFingerprint, saveImportTemplate, recordTemplateUsage } from "../db";
 import { requireAuth } from "../middleware/requireAuth";
-import { proposeColumnMapping, judgeMappingSemantics } from "../ai";
+import { proposeColumnMapping, judgeMappingSemantics } from "../services/ai";
 import {
   detectHeaderRow,
   extractHeaderCellsAtRow,
@@ -71,10 +71,10 @@ import {
   getSheetSummaries,
   ColumnMapping,
   MappableField,
-} from "../templates";
-import { computeAccuracyScore, AccuracyScore } from "../scoring";
-import { VehicleRow, SkippedRow } from "../parser";
-import { FlaggedRow } from "../templates";
+} from "../services/templates";
+import { computeAccuracyScore, AccuracyScore } from "../services/scoring";
+import { VehicleRow, SkippedRow } from "../services/parser";
+import { FlaggedRow } from "../services/templates";
 
 /**
  * SheetPreview -- the response shape of a successful (status: "preview")

@@ -69,7 +69,7 @@ import {
   getScheduledReportById,
   listReportRuns,
 } from "../db";
-import { runScheduledReportNow } from "../reports";
+import { runScheduledReportNow } from "../jobs/reports";
 import { requireAuth } from "../middleware/requireAuth";
 
 const router = Router();

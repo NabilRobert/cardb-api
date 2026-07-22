@@ -7,8 +7,8 @@
 
 import { Pool, types } from "pg";
 import * as dotenv from "dotenv";
-import { VehicleRow } from "./parser";
-import { ColumnMapping } from "./templates";
+import { VehicleRow } from "../services/parser";
+import { ColumnMapping } from "../services/templates";
 
 dotenv.config();
 

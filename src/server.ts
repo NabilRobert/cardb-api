@@ -41,7 +41,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import * as dotenv from "dotenv";
 import apiRouter from "./routes";
-import { startScheduler } from "./scheduler";
+import { startScheduler } from "./jobs/scheduler";
 
 dotenv.config();
 

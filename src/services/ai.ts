@@ -23,7 +23,7 @@
  *     the caller so you can see exactly what each call costs.
  */
 
-import { pool } from "./db";
+import { pool } from "../db";
 import { KNOWN_AREAS } from "./parser";
 import { MAPPABLE_FIELDS, MappableField, HeaderCell } from "./templates";
 

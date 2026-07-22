@@ -27,7 +27,7 @@
 
 import * as XLSX from "xlsx";
 import * as dotenv from "dotenv";
-import { detectHeaderRow, computeHeaderFingerprint, ColumnMapping } from "../templates";
+import { detectHeaderRow, computeHeaderFingerprint, ColumnMapping } from "../services/templates";
 import { saveImportTemplate, pool } from "../db";
 
 dotenv.config();

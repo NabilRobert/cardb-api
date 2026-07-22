@@ -16,7 +16,7 @@ import * as XLSX from "xlsx";
 import * as path from "path";
 import { Pool } from "pg";
 import * as dotenv from "dotenv";
-import { parseWorkbook, VehicleRow } from "./parser";
+import { parseWorkbook, VehicleRow } from "../services/parser";
 
 dotenv.config();
 
