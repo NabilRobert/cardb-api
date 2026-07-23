@@ -6,6 +6,7 @@
  * CORS_ORIGIN below) -- this process serves no frontend assets of its own.
  *   - GET  /api/config      no longer returns a key (see Phase 8 below); kept as an empty stub
  *   - GET  /api/health      liveness + DB connectivity check (no auth)
+ *   - POST /api/auth/signup public account registration (routes/auth.ts) -- creates an account, sets a session cookie
  *   - POST /api/auth/login  per-account login (routes/auth.ts) -- sets a session cookie, separate from API keys
  *   - POST /api/auth/logout clears the session cookie
  *   - GET  /api/auth/me     whether the current request has a valid session
