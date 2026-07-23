@@ -375,6 +375,128 @@ function stripTrailingOffer(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Marcus (Phase 9) -- the narrative layer for the whole-business heartbeat
+// (see jobs/marcus.ts, services/marcusCategories.ts). Two calls:
+//   - generateMarcusNarrative: same dedicated model as generateReportNarrative
+//     above (SUMMARIZER_API_KEY/SUMMARIZER_MODEL), turns the 9 categories'
+//     already-computed metrics/severities/deltas/top-mover/rain-context into
+//     a short grounded explanation + recommendation per category.
+//   - answerMarcusFollowUp: back on the cheaper gpt-5-mini/SUMOPOD_API_KEY --
+//     a single mechanical grounded lookup over one frozen heartbeat's
+//     already-serialized JSON, closer in cost/shape to askQuestion than to a
+//     prose-writing job. No SQL generation, no sanitizeSql involved.
+// ---------------------------------------------------------------------------
+
+const MARCUS_NARRATIVE_SYSTEM_PROMPT = `You write the narrative layer of Marcus, a proactive whole-business heartbeat for a used-car dealership's inventory. Each run you're given the already-computed numbers, severities, since-last-heartbeat deltas, and top mover across 9 fixed categories, plus recent findings from separately-scheduled reports ("rain_context") -- your job is to explain what's there in plain prose: one short explanation and one recommendation per category, plus one overall paragraph.
+
+Grounding (most important rule -- follow this above all the rest):
+- Only rephrase and aggregate what is actually present in the JSON you are given. Never introduce a vehicle, count, price, date, brand, percentage, or any other fact that isn't literally in that JSON, and never guess, estimate, or infer beyond it.
+- A category whose severity is "unknown" has no usable data this heartbeat -- say only that plainly, do not speculate about what the number might have been.
+- A category marked insufficient_history is on its first heartbeat -- do not claim a trend, increase, or decrease exists for it.
+- If rain_context lists a recent scheduled report that already covers ground a category touches on, reference it briefly ("as this week's Sales Pipeline report showed...") instead of re-deriving the same numbers independently.
+- If is_first_heartbeat is true, do not describe any change over time at all for any category.
+
+Output format:
+- Respond with ONLY a single JSON object of the shape {"overall": "<1-2 sentence paragraph>", "categories": {"<category_slug>": {"explanation": "<1-2 sentences>", "recommendation": "<1 sentence, or an empty string if severity is ok and nothing needs doing>"}, ...}} -- one entry per category slug present in the given metrics, no markdown, no code fences, no other text before or after the JSON object.
+- Plain prose sentences only inside each string value -- no bullets, no headers, no line breaks.
+- Never end any string value with a conversational offer or question ("let me know if...", "would you like..."). This is a stored record, not a conversation.`;
+
+export interface MarcusNarrative {
+  overall: string;
+  categories: Record<string, { explanation: string; recommendation: string }>;
+  parse_ok: boolean;
+}
+
+export interface MarcusNarrativeInput {
+  metrics: Record<string, unknown>;
+  severities: Record<string, unknown>;
+  deltas: Record<string, unknown>;
+  topMover: Record<string, unknown> | null;
+  rainContext: unknown[];
+  isFirstHeartbeat: boolean;
+}
+
+/**
+ * Never throws on a malformed model response -- falls back to
+ * { overall: <raw text>, categories: {}, parse_ok: false } so a narrative-
+ * formatting problem can never fail the heartbeat itself (metrics/severities
+ * are already valid and get stored regardless, see jobs/marcus.ts). Only a
+ * genuine chatCompletion failure (missing/invalid SUMMARIZER_API_KEY, a
+ * failed request) throws, same as generateReportNarrative.
+ */
+export async function generateMarcusNarrative(
+  input: MarcusNarrativeInput
+): Promise<{ narrative: MarcusNarrative; usage?: TokenUsage }> {
+  const userContent = JSON.stringify({
+    metrics: input.metrics,
+    severities: input.severities,
+    deltas: input.deltas,
+    top_mover: input.topMover,
+    rain_context: input.rainContext,
+    is_first_heartbeat: input.isFirstHeartbeat,
+  });
+
+  const { text, usage } = await chatCompletion(
+    MARCUS_NARRATIVE_SYSTEM_PROMPT,
+    userContent,
+    2500,
+    process.env.SUMMARIZER_API_KEY,
+    process.env.SUMMARIZER_MODEL || "gpt-5"
+  );
+  console.log("[marcus] narrative response:", text);
+
+  const fallback = (): { narrative: MarcusNarrative; usage?: TokenUsage } => ({
+    narrative: { overall: stripTrailingOffer(text.trim()), categories: {}, parse_ok: false },
+    usage,
+  });
+
+  const cleaned = text.replace(/```(?:json)?/gi, "").trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) return fallback();
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(match[0]);
+  } catch {
+    return fallback();
+  }
+  if (typeof parsed?.overall !== "string" || typeof parsed?.categories !== "object" || parsed.categories === null) {
+    return fallback();
+  }
+
+  const categories: Record<string, { explanation: string; recommendation: string }> = {};
+  for (const [slug, value] of Object.entries(parsed.categories)) {
+    if (!value || typeof (value as any).explanation !== "string") continue;
+    categories[slug] = {
+      explanation: stripTrailingOffer(String((value as any).explanation).trim()),
+      recommendation: stripTrailingOffer(String((value as any).recommendation ?? "").trim()),
+    };
+  }
+
+  return {
+    narrative: { overall: stripTrailingOffer(parsed.overall.trim()), categories, parse_ok: true },
+    usage,
+  };
+}
+
+const MARCUS_FOLLOWUP_SYSTEM_PROMPT = `You answer follow-up questions about one specific past Marcus heartbeat -- a frozen, already-computed snapshot of a used-car dealership's inventory health. You are given that snapshot's metrics, severities, and narrative as JSON, and a question about it.
+
+Grounding (most important rule):
+- Answer using only the JSON snapshot given below. This is a frozen record of a past check -- do not attempt to re-investigate the database, assume anything has changed since, or introduce any fact not present in the JSON.
+- If the JSON doesn't contain enough information to answer, say so plainly rather than guessing.
+
+Respond with a few plain sentences, no markdown, no bullets, no trailing conversational offer or question.`;
+
+export async function answerMarcusFollowUp(
+  snapshot: { metrics: Record<string, unknown>; severities: Record<string, unknown>; narrative: Record<string, unknown> },
+  question: string
+): Promise<{ text: string; usage?: TokenUsage }> {
+  const userContent = `Snapshot (JSON):\n${JSON.stringify(snapshot)}\n\nQuestion: ${question}`;
+  const { text, usage } = await chatCompletion(MARCUS_FOLLOWUP_SYSTEM_PROMPT, userContent);
+  return { text: stripTrailingOffer(text.trim()), usage };
+}
+
+// ---------------------------------------------------------------------------
 // Column-mapping proposal for unrecognized import formats (see templates.ts
 // and routes/upload.ts). Same one-call, no-second-guessing design as
 // askQuestion above: one cheap SumoPod call per unrecognized sheet, never
