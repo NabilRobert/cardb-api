@@ -6,10 +6,10 @@
  * CORS_ORIGIN below) -- this process serves no frontend assets of its own.
  *   - GET  /api/config      no longer returns a key (see Phase 8 below); kept as an empty stub
  *   - GET  /api/health      liveness + DB connectivity check (no auth)
- *   - POST /api/auth/signup public account registration (routes/auth.ts) -- creates an account, sets a session cookie
- *   - POST /api/auth/login  per-account login (routes/auth.ts) -- sets a session cookie, separate from API keys
- *   - POST /api/auth/logout clears the session cookie
- *   - GET  /api/auth/me     whether the current request has a valid session
+ *   - POST /api/auth/signup public account registration (routes/auth.ts) -- returns a bearer session token
+ *   - POST /api/auth/login  per-account login (routes/auth.ts) -- returns a bearer session token, separate from API keys
+ *   - POST /api/auth/logout no server-side session to revoke (stateless JWT); exists for frontend symmetry
+ *   - GET  /api/auth/me     whether the bearer token on this request is a valid session
  *   - POST /api/auth/api-keys              generate a new API key for the logged-in account (routes/apiKeys.ts) -- shown once, here
  *   - GET  /api/auth/api-keys              list the logged-in account's own keys (never the key/hash itself)
  *   - POST /api/auth/api-keys/:id/revoke   revoke one of the logged-in account's own keys, effective immediately
@@ -34,7 +34,7 @@
  * requireAuth.ts and middleware/apiKey.ts, now identical -- see
  * middleware/apiKeyAuth.ts) requires a valid X-API-Key header, no
  * exceptions, unconditionally -- including the app's own frontend. A
- * session cookie from /api/auth/login is NOT a substitute for it anywhere;
+ * session token from /api/auth/login is NOT a substitute for it anywhere;
  * the session only gates this account's own login state and the
  * /api/auth/api-keys management endpoints (middleware/requireSession.ts).
  * The key itself is validated by hashing it (SHA-256) and looking up a
@@ -58,7 +58,6 @@
 
 import express from "express";
 import cors from "cors";
-import cookieParser from "cookie-parser";
 import * as dotenv from "dotenv";
 import apiRouter from "./routes";
 import { startScheduler } from "./jobs/scheduler";
@@ -68,26 +67,25 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// credentials: true is required for the session cookie (see
-// middleware/session.ts / routes/auth.ts) to be sent on cross-origin
-// requests at all -- but browsers reject Access-Control-Allow-Credentials
-// combined with a wildcard Access-Control-Allow-Origin (confirmed live:
+// credentials: true keeps Access-Control-Allow-Credentials: true on
+// responses -- harmless to leave on even now that the session is a bearer
+// token, not a cookie (see middleware/session.ts's doc comment for why it
+// moved off cookies), and safer to leave alone than to guess whether the
+// frontend still issues any credentialed ("credentials: include") fetches
+// elsewhere. Browsers reject Access-Control-Allow-Credentials combined with
+// a wildcard Access-Control-Allow-Origin regardless (confirmed live:
 // "Cannot use wildcard in Access-Control-Allow-Origin when credentials flag
-// is true"). The X-API-Key path is unaffected either way, since it doesn't
-// rely on cookies/credentials at all.
+// is true"), which is why CORS_ORIGIN can't just be "*" for this to work.
 //
 // CORS_ORIGIN is a comma-separated allow-list (e.g.
 // "http://localhost:5173,https://app.example.com"), not a single value --
 // so adding a real deployed frontend origin later is one env-var edit, not
 // a swap. A bare "*" is still honored as the literal wildcard for anyone
-// who hasn't set this yet, but note it still won't work for the cookie
-// login above; it only keeps the non-credentialed X-API-Key path open the
-// same as before.
+// who hasn't set this yet.
 const corsOrigins = (process.env.CORS_ORIGIN || "*").split(",").map((o) => o.trim()).filter(Boolean);
 const corsOriginOption = corsOrigins.length === 1 && corsOrigins[0] === "*" ? "*" : corsOrigins;
 app.use(cors({ origin: corsOriginOption, credentials: true }));
 app.use(express.json());
-app.use(cookieParser());
 
 app.use("/api", apiRouter);
 

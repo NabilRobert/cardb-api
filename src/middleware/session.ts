@@ -1,41 +1,36 @@
 /**
  * middleware/session.ts
  *
- * Session handling for the web app's login (see routes/auth.ts). As of
- * Phase 8, credentials are checked against real rows in the `accounts`
- * table (see db.ts) rather than a single ADMIN_USERNAME/ADMIN_PASSWORD_HASH
- * env-var pair -- the JWT payload carries the real account id/username so
- * routes/apiKeys.ts (which needs to know *which* account is asking) can
- * trust it. A successful login gets a signed JWT stored in an httpOnly
- * cookie, not a server-side session store -- verifying a session is just
- * verifying the JWT's signature and expiry, no DB lookup needed.
+ * Session handling for the web app's login (see routes/auth.ts). Credentials
+ * are checked against real rows in the `accounts` table (see db.ts). A
+ * successful login/signup gets a signed JWT -- verifying a session is just
+ * verifying the JWT's signature and expiry, no DB lookup or server-side
+ * session store needed.
+ *
+ * Bearer token, not a cookie (post-investigation fix): this was originally
+ * an httpOnly SameSite=None cookie, which is spec-correct for cross-site
+ * use but still not reliably delivered in real browsers -- SameSite=None
+ * only opts a cookie out of *SameSite* blocking, it does NOT exempt it from
+ * separate third-party-cookie blocking (Safari ITP, Firefox Total Cookie
+ * Protection, Chrome's third-party cookie deprecation), which applies here
+ * regardless because the frontend and this API are on different registrable
+ * domains. That let a real signup/login appear to succeed (the 200 response
+ * itself is unaffected) while the browser silently never stored or resent
+ * the cookie, so the very next session-gated call 401'd. A bearer token in
+ * a normal header isn't subject to any of that -- it's exactly why
+ * X-API-Key already works fine cross-site (see middleware/apiKeyAuth.ts).
  *
  * This session is deliberately NOT an alternative to X-API-Key on the data
- * routes (see middleware/apiKeyAuth.ts) -- it only gates the web app's own
- * login-walled UI and the account/api-key management endpoints
- * (routes/apiKeys.ts, via middleware/requireSession.ts).
+ * routes -- it only gates the web app's own login-walled UI and the
+ * account/api-key management endpoints (routes/apiKeys.ts, via
+ * middleware/requireSession.ts).
  */
 
 import jwt from "jsonwebtoken";
-import { CookieOptions } from "express";
-
-export const SESSION_COOKIE_NAME = "session";
 
 // 14 days: within the requested 7-30 day range, so the team isn't
 // constantly re-logging in for a single shared login.
 const SESSION_TTL_SECONDS = 14 * 24 * 60 * 60;
-
-export const SESSION_COOKIE_OPTIONS: CookieOptions = {
-  httpOnly: true,
-  secure: true,
-  // The frontend is a separately deployed app on a different origin (see
-  // server.ts's own doc comment), so the cookie must be sendable
-  // cross-site -- SameSite=None requires Secure=true, which is already set
-  // above (production is HTTPS-only behind nginx).
-  sameSite: "none",
-  maxAge: SESSION_TTL_SECONDS * 1000,
-  path: "/",
-};
 
 export interface SessionPayload {
   accountId: number;
@@ -48,7 +43,7 @@ function getSecret(): string {
   return secret;
 }
 
-/** Signs a new session token for a real account (post Phase 8). */
+/** Signs a new session token for a real account. Returned in the login/signup response body. */
 export function signSessionToken(accountId: number, username: string): string {
   const payload: SessionPayload = { accountId, username };
   return jwt.sign(payload, getSecret(), { expiresIn: SESSION_TTL_SECONDS });
@@ -74,4 +69,11 @@ export function decodeSessionToken(token: string): SessionPayload | null {
 /** True if `token` is a validly-signed, unexpired session token. Used by GET /api/auth/me. */
 export function verifySessionToken(token: string): boolean {
   return decodeSessionToken(token) !== null;
+}
+
+/** Pulls the raw token out of a standard "Authorization: Bearer <token>" header, if present. */
+export function getBearerToken(authorizationHeader: string | undefined): string | undefined {
+  if (!authorizationHeader?.startsWith("Bearer ")) return undefined;
+  const token = authorizationHeader.slice("Bearer ".length).trim();
+  return token || undefined;
 }

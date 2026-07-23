@@ -1,39 +1,48 @@
 /**
  * routes/auth.ts
  *
- * Phase 8: login now checks a real row in the `accounts` table (db.ts)
- * instead of a single ADMIN_USERNAME/ADMIN_PASSWORD_HASH env-var pair --
- * see migration_add_accounts_and_api_keys.sql and
- * scripts/seed_admin_account.ts for how the previously-shared credential
- * became the first real account row. Request/response shapes are
- * unchanged from before Phase 8.
+ * Login/signup check real rows in the `accounts` table (db.ts). Session is
+ * a bearer token in the response body, not a cookie -- see
+ * middleware/session.ts's doc comment for why: a cross-site cookie here
+ * (frontend and this API are on different registrable domains) was subject
+ * to browser third-party-cookie blocking even with correct
+ * SameSite=None; Secure attributes, so a real signup/login could appear to
+ * succeed while the browser silently never stored or resent the cookie,
+ * 401-ing on the very next session-gated call. This response-shape change
+ * (adding `token`) is the fix for that; POST /api/auth/api-keys itself
+ * (middleware/requireSession.ts) now reads "Authorization: Bearer <token>".
  *
- * POST /api/auth/signup - { username, password } -> { success: true } and
- *   sets an httpOnly session cookie, same as login -- creates a new
- *   accounts row (bcrypt-hashed password) so the frontend can chain
- *   straight into POST /api/auth/api-keys for that account's first key
- *   without a separate login round-trip. username must be non-empty (after
- *   trimming) and <= 64 chars; password must be >= 8 chars. 400 on either
- *   validation failure, 409 if the username is already taken.
- * POST /api/auth/login  - { username, password } -> { success: true } and
- *   sets an httpOnly session cookie. 401 on wrong credentials.
- * POST /api/auth/logout - clears the session cookie -> { success: true }.
+ * POST /api/auth/signup - { username, password } -> { success: true, token }
+ *   -- creates a new accounts row (bcrypt-hashed password). username must
+ *   be non-empty (after trimming) and <= 64 chars; password must be >= 8
+ *   chars. 400 on either validation failure, 409 if the username is
+ *   already taken. The frontend stores `token` and sends it as
+ *   "Authorization: Bearer <token>" on /api/auth/me, /api/auth/api-keys,
+ *   etc. -- lets it chain straight into generating that account's first
+ *   API key without a separate login round-trip.
+ * POST /api/auth/login  - { username, password } -> { success: true, token }.
+ *   401 on wrong credentials.
+ * POST /api/auth/logout - { success: true }. The token is a stateless JWT
+ *   with no server-side session record to revoke (same as before this was
+ *   a cookie) -- this endpoint exists for symmetry/frontend bookkeeping;
+ *   the frontend is what actually "logs out" by discarding its stored
+ *   token.
  * GET  /api/auth/me     - { authenticated: boolean }, based on whatever
- *   session cookie (if any) came with the request. Never errors -- lets the
- *   frontend check auth state on page load without attempting a real
- *   protected call first.
+ *   bearer token (if any) came with the request. Never errors -- lets the
+ *   frontend check auth state on load without attempting a real protected
+ *   call first.
  *
  * None of these four require requireAuth themselves -- signing up/logging
  * in can't require already being logged in, and /me's whole point is to
  * answer that question safely for an unauthenticated caller too. This
- * session cookie is NOT an alternative to X-API-Key on the data routes (see
+ * session token is NOT an alternative to X-API-Key on the data routes (see
  * middleware/apiKeyAuth.ts) -- it only gates this account's own login
  * state and the api-key management endpoints (routes/apiKeys.ts).
  */
 
 import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
-import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS, signSessionToken, verifySessionToken } from "../middleware/session";
+import { signSessionToken, verifySessionToken, getBearerToken } from "../middleware/session";
 import { findAccountByUsername, createAccount } from "../db";
 
 const router = Router();
@@ -89,8 +98,7 @@ router.post("/signup", async (req: Request, res: Response) => {
     }
 
     const token = signSessionToken(account.id, account.username);
-    res.cookie(SESSION_COOKIE_NAME, token, SESSION_COOKIE_OPTIONS);
-    res.json({ success: true });
+    res.json({ success: true, token });
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: "Server error", detail: err.message });
@@ -122,17 +130,15 @@ router.post("/login", async (req: Request, res: Response) => {
   }
 
   const token = signSessionToken(account.id, account.username);
-  res.cookie(SESSION_COOKIE_NAME, token, SESSION_COOKIE_OPTIONS);
-  res.json({ success: true });
+  res.json({ success: true, token });
 });
 
 router.post("/logout", (_req: Request, res: Response) => {
-  res.clearCookie(SESSION_COOKIE_NAME, { ...SESSION_COOKIE_OPTIONS, maxAge: undefined });
   res.json({ success: true });
 });
 
 router.get("/me", (req: Request, res: Response) => {
-  const token = req.cookies?.[SESSION_COOKIE_NAME];
+  const token = getBearerToken(req.header("Authorization"));
   const authenticated = typeof token === "string" && verifySessionToken(token);
   res.json({ authenticated });
 });
