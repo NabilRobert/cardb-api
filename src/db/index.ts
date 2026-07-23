@@ -37,7 +37,10 @@ function formatTimestamp(d: Date): string {
 }
 
 const DATE_ONLY_FIELDS = ["stnk_expiry_date", "purchase_date", "handover_date"] as const;
-const TIMESTAMP_FIELDS = ["created_at", "updated_at", "uploaded_at", "resolved_at", "read_at", "last_run_at"] as const;
+const TIMESTAMP_FIELDS = [
+  "created_at", "updated_at", "uploaded_at", "resolved_at", "read_at", "last_run_at",
+  "last_used_at", "revoked_at",
+] as const;
 
 function formatRowDates<T extends Record<string, any>>(row: T): T {
   const out: any = { ...row };
@@ -783,4 +786,98 @@ export async function listReportRuns(scheduledReportId: number, params: ReportRu
     [scheduledReportId, limit, offset]
   );
   return result.rows.map(formatRowDates);
+}
+
+// ---------------------------------------------------------------------------
+// accounts / api_keys -- Phase 8: real per-account API keys, replacing the
+// single static API_KEY env var. See services/apiKeys.ts for raw-key
+// generation/hashing, middleware/apiKeyAuth.ts for the request-time check
+// that calls findApiKeyByHash below, and routes/apiKeys.ts for the
+// generate/list/revoke endpoints.
+// ---------------------------------------------------------------------------
+
+export interface Account {
+  id: number;
+  username: string;
+  password_hash: string;
+  created_at: string;
+}
+
+export async function findAccountByUsername(username: string): Promise<Account | null> {
+  const result = await pool.query(
+    "SELECT id, username, password_hash, created_at FROM accounts WHERE username = $1",
+    [username]
+  );
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
+// Used only by scripts/seed_admin_account.ts to make seeding idempotent
+// (insert the shared demoman credential as a real row exactly once).
+export async function createAccount(username: string, passwordHash: string): Promise<Account> {
+  const result = await pool.query(
+    "INSERT INTO accounts (username, password_hash) VALUES ($1, $2) RETURNING id, username, password_hash, created_at",
+    [username, passwordHash]
+  );
+  return formatRowDates(result.rows[0]);
+}
+
+// Public-facing shape of an api_keys row -- key_hash is deliberately never
+// selected here or anywhere outside findApiKeyByHash below, since it's the
+// one column that must never leave this file.
+export interface ApiKeyRow {
+  id: number;
+  account_id: number;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+const API_KEY_PUBLIC_COLUMNS = "id, account_id, created_at, last_used_at, revoked_at";
+
+export async function createApiKey(accountId: number, keyHash: string): Promise<ApiKeyRow> {
+  const result = await pool.query(
+    `INSERT INTO api_keys (account_id, key_hash) VALUES ($1, $2) RETURNING ${API_KEY_PUBLIC_COLUMNS}`,
+    [accountId, keyHash]
+  );
+  return formatRowDates(result.rows[0]);
+}
+
+export async function listApiKeysForAccount(accountId: number): Promise<ApiKeyRow[]> {
+  const result = await pool.query(
+    `SELECT ${API_KEY_PUBLIC_COLUMNS} FROM api_keys WHERE account_id = $1 ORDER BY created_at DESC`,
+    [accountId]
+  );
+  return result.rows.map(formatRowDates);
+}
+
+// Scoped to accountId so one account can never revoke another's key. Only
+// succeeds (returns a row) if the key exists, belongs to this account, and
+// isn't already revoked -- matches the same "no-op if already in that
+// state" convention as resolveNotification.
+export async function revokeApiKey(id: number, accountId: number): Promise<ApiKeyRow | null> {
+  const result = await pool.query(
+    `UPDATE api_keys SET revoked_at = now()
+     WHERE id = $1 AND account_id = $2 AND revoked_at IS NULL
+     RETURNING ${API_KEY_PUBLIC_COLUMNS}`,
+    [id, accountId]
+  );
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
+// The one lookup every single API request makes. Only matches a
+// non-revoked key -- revocation takes effect on the very next request,
+// nothing else to invalidate or expire.
+export async function findApiKeyByHash(keyHash: string): Promise<{ id: number; accountId: number } | null> {
+  const result = await pool.query(
+    "SELECT id, account_id FROM api_keys WHERE key_hash = $1 AND revoked_at IS NULL",
+    [keyHash]
+  );
+  return result.rows[0] ? { id: result.rows[0].id, accountId: result.rows[0].account_id } : null;
+}
+
+// Fire-and-forget from the request path (see middleware/apiKeyAuth.ts) --
+// never awaited there, so a slow/failed update never adds latency or
+// failure risk to an otherwise-valid request.
+export async function touchApiKeyLastUsed(id: number): Promise<void> {
+  await pool.query("UPDATE api_keys SET last_used_at = now() WHERE id = $1", [id]);
 }

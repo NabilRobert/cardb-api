@@ -150,3 +150,26 @@ CREATE TABLE IF NOT EXISTS import_templates (
     times_corrected INTEGER NOT NULL DEFAULT 0, -- incremented when the submitted mapping differs from what was originally proposed (see migration_add_template_usage_tracking.sql)
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- accounts / api_keys: real per-account API keys (Phase 8), replacing the
+-- single static API_KEY env var. See migration_add_accounts_and_api_keys.sql
+-- for the full rationale (in particular why api_keys.key_hash is a plain
+-- SHA-256 digest, not bcrypt/argon2 -- that's reserved for
+-- accounts.password_hash).
+CREATE TABLE IF NOT EXISTS accounts (
+    id SERIAL PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ(3) NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id SERIAL PRIMARY KEY,
+    key_hash TEXT NOT NULL UNIQUE,
+    account_id INTEGER NOT NULL REFERENCES accounts(id),
+    created_at TIMESTAMPTZ(3) NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ(3),
+    revoked_at TIMESTAMPTZ(3)
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_account_id ON api_keys (account_id);

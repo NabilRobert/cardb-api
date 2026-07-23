@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "ingest": "ts-node src/scripts/ingest_excel.ts",
+    "seed:admin": "ts-node src/scripts/seed_admin_account.ts",
     "dev:server": "ts-node src/server.ts",
     "start": "ts-node src/server.ts"
   },

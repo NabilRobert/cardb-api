@@ -1,23 +1,12 @@
 /**
  * middleware/apiKey.ts
  *
- * Requires the API key in an X-API-Key header. Still applied directly to
- * /api/uploads (upload history) -- everything else that used to import this
- * directly (/api/vehicles*, /api/upload*, /api/ask, /api/templates) now
- * goes through middleware/requireAuth.ts instead, which accepts this same
- * check OR a session cookie from the shared web-app login (routes/auth.ts).
- * /api/config and /api/health stay reachable without either.
+ * Phase 8: this is now exactly middleware/apiKeyAuth.ts's mandatory,
+ * DB-backed X-API-Key check -- re-exported under this historical name so
+ * /api/uploads (the one route that still imports { requireApiKey } from
+ * here directly) keeps working unchanged. requireAuth.ts re-exports the
+ * same thing under its own name; the two were already doing equivalent
+ * checks for the X-API-Key case and are now identical in every case.
  */
 
-import { Request, Response, NextFunction } from "express";
-
-export function requireApiKey(req: Request, res: Response, next: NextFunction) {
-  const key = req.header("X-API-Key");
-  if (!process.env.API_KEY) {
-    return res.status(500).json({ error: "Server misconfigured: API_KEY not set" });
-  }
-  if (key !== process.env.API_KEY) {
-    return res.status(401).json({ error: "Missing or invalid X-API-Key header" });
-  }
-  next();
-}
+export { requireValidApiKey as requireApiKey } from "./apiKeyAuth";

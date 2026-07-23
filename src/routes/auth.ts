@@ -1,10 +1,12 @@
 /**
  * routes/auth.ts
  *
- * Shared login for the web app -- one team-wide username/password
- * (ADMIN_USERNAME / ADMIN_PASSWORD_HASH env vars), not per-user accounts.
- * A separate, additional gate in front of the web app itself; the existing
- * X-API-Key scheme (middleware/apiKey.ts) is untouched.
+ * Phase 8: login now checks a real row in the `accounts` table (db.ts)
+ * instead of a single ADMIN_USERNAME/ADMIN_PASSWORD_HASH env-var pair --
+ * see migration_add_accounts_and_api_keys.sql and
+ * scripts/seed_admin_account.ts for how the previously-shared credential
+ * became the first real account row. Request/response shapes are
+ * unchanged from before Phase 8.
  *
  * POST /api/auth/login  - { username, password } -> { success: true } and
  *   sets an httpOnly session cookie. 401 on wrong credentials.
@@ -16,14 +18,26 @@
  *
  * None of these three require requireAuth themselves -- logging in can't
  * require already being logged in, and /me's whole point is to answer that
- * question safely for an unauthenticated caller too.
+ * question safely for an unauthenticated caller too. This session cookie is
+ * NOT an alternative to X-API-Key on the data routes (see
+ * middleware/apiKeyAuth.ts) -- it only gates this account's own login
+ * state and the api-key management endpoints (routes/apiKeys.ts).
  */
 
 import { Router, Request, Response } from "express";
 import bcrypt from "bcryptjs";
 import { SESSION_COOKIE_NAME, SESSION_COOKIE_OPTIONS, signSessionToken, verifySessionToken } from "../middleware/session";
+import { findAccountByUsername } from "../db";
 
 const router = Router();
+
+// A fixed, valid bcrypt hash of a string nobody will ever type as a real
+// password -- compared against when the username doesn't match any
+// account, so "unknown username" and "wrong password" take the same amount
+// of time. Not a real credential, doesn't need to be secret; it's only
+// here to keep bcrypt.compare's cost consistent regardless of which case
+// triggered it.
+const DUMMY_HASH = "$2b$12$XTzqmW0NIioLvfqtzSEnDOYXU984zQ1sbVfNAgcAgqkP4tBMDuYIG";
 
 router.post("/login", async (req: Request, res: Response) => {
   const { username, password } = req.body ?? {};
@@ -31,23 +45,25 @@ router.post("/login", async (req: Request, res: Response) => {
     return res.status(401).json({ error: "Invalid username or password" });
   }
 
-  if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD_HASH) {
-    console.error("ADMIN_USERNAME / ADMIN_PASSWORD_HASH not set");
-    return res.status(500).json({ error: "Server misconfigured" });
+  let account;
+  try {
+    account = await findAccountByUsername(username);
+  } catch (err: any) {
+    console.error(err);
+    return res.status(500).json({ error: "Server error", detail: err.message });
   }
 
-  // bcrypt.compare is run regardless of whether the username already
-  // failed, so a wrong username doesn't return faster than a wrong
-  // password would -- one less timing signal for an attacker to use to
-  // tell "bad username" apart from "bad password".
-  const usernameOk = username === process.env.ADMIN_USERNAME;
-  const passwordOk = await bcrypt.compare(password, process.env.ADMIN_PASSWORD_HASH);
+  // bcrypt.compare always runs, even against a dummy hash when the
+  // username doesn't exist, so a wrong username doesn't return faster than
+  // a wrong password would -- one less timing signal for an attacker to
+  // use to enumerate valid usernames.
+  const passwordOk = await bcrypt.compare(password, account?.password_hash ?? DUMMY_HASH);
 
-  if (!usernameOk || !passwordOk) {
+  if (!account || !passwordOk) {
     return res.status(401).json({ error: "Invalid username or password" });
   }
 
-  const token = signSessionToken();
+  const token = signSessionToken(account.id, account.username);
   res.cookie(SESSION_COOKIE_NAME, token, SESSION_COOKIE_OPTIONS);
   res.json({ success: true });
 });

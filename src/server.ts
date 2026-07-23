@@ -4,11 +4,14 @@
  * API-only server for the vehicle inventory system. The frontend is a
  * separately deployed Vue app that calls this API over the network (see
  * CORS_ORIGIN below) -- this process serves no frontend assets of its own.
- *   - GET  /api/config      returns the API key so the frontend can auth itself (local/testing convenience)
+ *   - GET  /api/config      no longer returns a key (see Phase 8 below); kept as an empty stub
  *   - GET  /api/health      liveness + DB connectivity check (no auth)
- *   - POST /api/auth/login  shared web-app login (routes/auth.ts) -- sets a session cookie, separate from the API key
+ *   - POST /api/auth/login  per-account login (routes/auth.ts) -- sets a session cookie, separate from API keys
  *   - POST /api/auth/logout clears the session cookie
  *   - GET  /api/auth/me     whether the current request has a valid session
+ *   - POST /api/auth/api-keys              generate a new API key for the logged-in account (routes/apiKeys.ts) -- shown once, here
+ *   - GET  /api/auth/api-keys              list the logged-in account's own keys (never the key/hash itself)
+ *   - POST /api/auth/api-keys/:id/revoke   revoke one of the logged-in account's own keys, effective immediately
  *   - POST /api/upload                    step 1 of 3: list a workbook's sheets, nothing processed yet
  *   - POST /api/upload/process-sheet      step 2 of 3: parse a chosen sheet, return a preview, nothing inserted yet
  *   - POST /api/upload/confirm-mapping    step 3 of 3: commit -- save the mapping and insert
@@ -25,19 +28,31 @@
  *   - PATCH/DELETE /api/scheduled-reports/:id   edit (incl. enable/disable) or remove one
  *
  * Route handlers live in routes/ (one file per resource, see routes/index.ts).
- * Most data routes require middleware/requireAuth.ts (X-API-Key header OR a
- * session cookie from /api/auth/login); /api/uploads still uses
- * middleware/apiKey.ts's X-API-Key-only check directly (not yet moved over
- * to accept a session too). This file also starts scheduler.ts's background
- * jobs (nightly notifications, and a per-minute due-check for scheduled
- * reports) alongside the HTTP server.
  *
- * Requires DATABASE_URL, API_KEY, SUMOPOD_API_KEY, ADMIN_USERNAME,
- * ADMIN_PASSWORD_HASH, and SESSION_SECRET in .env. SUMMARIZER_API_KEY (and
- * optionally SUMMARIZER_MODEL, defaults to "gpt-5") is required for the
- * scheduled-report narrative summarizer (see services/ai.ts's
- * generateReportNarrative) -- if unset, that one call fails and
- * narrative_summary just stays null, nothing else is affected.
+ * Phase 8 -- real per-account API keys: every data route (middleware/
+ * requireAuth.ts and middleware/apiKey.ts, now identical -- see
+ * middleware/apiKeyAuth.ts) requires a valid X-API-Key header, no
+ * exceptions, unconditionally -- including the app's own frontend. A
+ * session cookie from /api/auth/login is NOT a substitute for it anywhere;
+ * the session only gates this account's own login state and the
+ * /api/auth/api-keys management endpoints (middleware/requireSession.ts).
+ * The key itself is validated by hashing it (SHA-256) and looking up a
+ * matching, non-revoked row in api_keys -- there is no static API_KEY env
+ * var anymore, and no unauthenticated endpoint ever returns a usable key.
+ * This file also starts scheduler.ts's background jobs (nightly
+ * notifications, and a per-minute due-check for scheduled reports)
+ * alongside the HTTP server.
+ *
+ * Requires DATABASE_URL, SESSION_SECRET, and SUMOPOD_API_KEY in .env.
+ * SUMMARIZER_API_KEY (and optionally SUMMARIZER_MODEL, defaults to "gpt-5")
+ * is required for the scheduled-report narrative summarizer (see
+ * services/ai.ts's generateReportNarrative) -- if unset, that one call
+ * fails and narrative_summary just stays null, nothing else is affected.
+ * API_KEY, ADMIN_USERNAME, and ADMIN_PASSWORD_HASH are no longer read by
+ * the running server at all post-Phase-8 (ADMIN_USERNAME/
+ * ADMIN_PASSWORD_HASH are only ever read once, by
+ * scripts/seed_admin_account.ts) -- safe to remove from .env whenever
+ * convenient.
  */
 
 import express from "express";
