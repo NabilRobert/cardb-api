@@ -677,3 +677,156 @@ export function getHeadlineMetric(slug: CategorySlug, metrics: Record<string, un
       return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Deterministic narrative fallback -- the hard guarantee under
+// generateMarcusNarrative's AI attempt (see ai.ts): if the model's JSON
+// still omits a category (or garbles it) after retries, jobs/marcus.ts
+// builds a plain, code-written explanation + recommendation for exactly
+// that category from the same already-computed metrics/severity the
+// threshold logic produced -- no further AI call, so it can never fail the
+// same way twice. Deliberately plainer than the AI version (no vehicle-by-
+// vehicle narrative flourish), it just always has to be there.
+// ---------------------------------------------------------------------------
+export interface NarrativeEntry {
+  explanation: string;
+  recommendation: string;
+}
+
+function fmtMoney(n: number): string {
+  return `Rp${Math.round(n).toLocaleString("id-ID")}`;
+}
+
+export function buildFallbackNarrativeEntry(
+  slug: CategorySlug,
+  metrics: Record<string, unknown> | null,
+  severity: CategorySeverity
+): NarrativeEntry {
+  // No usable data at all -- say why, rather than leaving it blank or
+  // inventing a recommendation the data can't support.
+  if (severity.severity === "unknown" || metrics === null) {
+    const reason = severity.note ?? "no usable data was available for this category this heartbeat.";
+    return {
+      explanation: `No usable data for this category this heartbeat: ${reason}`,
+      recommendation: "No recommendation available until this category computes successfully on a future heartbeat.",
+    };
+  }
+
+  const ok = severity.severity === "ok";
+  const noAction = "No action needed this heartbeat.";
+
+  switch (slug) {
+    case "inventory_health": {
+      const m = metrics as any;
+      const worstGroup = typeof m.worst_group === "string" ? m.worst_group : null;
+      if (!worstGroup) {
+        return { explanation: "No group had enough data to compare against a trailing average.", recommendation: noAction };
+      }
+      const ratio = toNumber(m.worst_ratio);
+      const current = toNumber(m.worst_group_current_count);
+      const baseline = toNumber(m.worst_group_baseline_count);
+      const explanation = `${worstGroup} is the weakest group, at ${ratio !== null ? (ratio * 100).toFixed(0) : "?"}% of its trailing average (${current ?? "?"} now vs a baseline of ${baseline !== null ? baseline.toFixed(1) : "?"}).`;
+      return { explanation, recommendation: ok ? noAction : `Review restocking for ${worstGroup}.` };
+    }
+
+    case "aging_inventory": {
+      const m = metrics as any;
+      const avgAge = toNumber(m.avg_age_days);
+      const buckets = m.buckets ?? {};
+      const vehicles: any[] = Array.isArray(m.vehicles) ? m.vehicles.slice(0, 3) : [];
+      const explanation = `Average age on lot is ${avgAge !== null ? avgAge.toFixed(1) : "?"} days across ${m.candidate_count ?? "?"} available units (${buckets["90_plus"] ?? 0} over 90 days, ${buckets["61_90"] ?? 0} in the 61-90 day range).`;
+      const recommendation = vehicles.length === 0
+        ? noAction
+        : `Prioritize ${vehicles.map((v) => `${v.license_plate ?? "vehicle #" + v.id} (${v.days_on_lot} days)`).join(", ")} for discounting or a sales push.`;
+      return { explanation, recommendation };
+    }
+
+    case "sales_velocity": {
+      const m = metrics as any;
+      const total = toNumber(m.total_this_week);
+      const avg = toNumber(m.trailing_4week_avg_sold_per_week);
+      const explanation = `This week's sold+booked total is ${total ?? "?"} against a trailing 4-week average of ${avg !== null ? avg.toFixed(1) : "?"} per week.`;
+      return { explanation, recommendation: ok ? noAction : "Review this week's sales pipeline against the trailing average to see what stalled." };
+    }
+
+    case "stnk_compliance": {
+      const m = metrics as any;
+      const worst: any[] = Array.isArray(m.vehicles) ? m.vehicles.slice(0, 3) : [];
+      const explanation = `${m.expired_count ?? 0} available vehicle(s) have an expired STNK and ${m.expiring_soon_count ?? 0} are expiring within ${m.window_days ?? "?"} days.`;
+      const recommendation = worst.length === 0
+        ? noAction
+        : `Renew these first: ${worst.map((v) => `${v.license_plate ?? "vehicle #" + v.id} (${v.days_diff} days)`).join(", ")}.`;
+      return { explanation, recommendation };
+    }
+
+    case "pricing_signals": {
+      const m = metrics as any;
+      const outliers: any[] = Array.isArray(m.outliers) ? m.outliers.slice(0, 3) : [];
+      const explanation = `${m.outlier_count ?? 0} pricing outlier(s) detected this heartbeat.`;
+      const recommendation = outliers.length === 0
+        ? noAction
+        : `Review pricing on ${outliers.map((o) => `${o.license_plate ?? "?"} (${Number(o.deviation_pct).toFixed(0)}% off group median)`).join(", ")}.`;
+      return { explanation, recommendation };
+    }
+
+    case "data_hygiene": {
+      const m = metrics as any;
+      const vehicles: any[] = Array.isArray(m.vehicles) ? m.vehicles.slice(0, 3) : [];
+      const explanation = `${m.total_count ?? 0} available vehicle(s) are missing required data (${m.missing_price_count ?? 0} price, ${m.missing_stnk_count ?? 0} STNK, ${m.missing_purchase_date_count ?? 0} purchase date).`;
+      const recommendation = vehicles.length === 0
+        ? noAction
+        : `Fix these first: ${vehicles.map((v) => `${v.license_plate ?? "vehicle #" + v.id} (missing ${(v.missing_fields ?? []).join(", ")})`).join(", ")}.`;
+      return { explanation, recommendation };
+    }
+
+    case "stalled_bookings": {
+      const m = metrics as any;
+      const stalled: any[] = Array.isArray(m.stalled) ? m.stalled.slice(0, 3) : [];
+      const explanation = `${m.stalled_count ?? 0} booking(s) have gone unconverted past ${STALLED_BOOKING_WATCH_DAYS} days.`;
+      const recommendation = stalled.length === 0
+        ? noAction
+        : `Follow up on ${stalled.map((s) => `${s.license_plate ?? "?"} (${s.days_booked} days booked)`).join(", ")}.`;
+      return { explanation, recommendation };
+    }
+
+    case "discount_drift": {
+      const m = metrics as any;
+      const avgGapPct = toNumber(m.avg_gap_pct);
+      const explanation = avgGapPct === null
+        ? "No discount-gap data was available this heartbeat."
+        : `Average discount gap is ${avgGapPct.toFixed(2)}% across ${m.sample_count ?? "?"} sampled vehicles.`;
+      return { explanation, recommendation: ok ? noAction : "Review pricing policy -- the discount gap has widened past its normal range." };
+    }
+
+    case "financial_snapshot": {
+      const m = metrics as any;
+      const stockValue = toNumber(m.stock_value);
+      const realizedTotal = toNumber(m.realized_total);
+      const explanation = stockValue === null
+        ? "No stock value data was available this heartbeat."
+        : `Current stock value is ${fmtMoney(stockValue)} with a realized total of ${fmtMoney(realizedTotal ?? 0)} this period.`;
+      return { explanation, recommendation: ok ? noAction : "Review why realized revenue isn't offsetting the change in stock value." };
+    }
+
+    default:
+      return { explanation: "No data available for this category.", recommendation: "No recommendation available." };
+  }
+}
+
+// Used when the AI narrative call never returns a usable `overall` paragraph
+// even after retries -- a plain, deterministic roll-up of severities so the
+// heartbeat's top-level summary is never blank either.
+export function buildFallbackOverall(severities: Record<string, CategorySeverity>): string {
+  const attention = CATEGORY_SLUGS.filter((slug) => severities[slug]?.severity === "attention");
+  const watch = CATEGORY_SLUGS.filter((slug) => severities[slug]?.severity === "watch");
+  const unknown = CATEGORY_SLUGS.filter((slug) => severities[slug]?.severity === "unknown");
+
+  if (attention.length === 0 && watch.length === 0 && unknown.length === 0) {
+    return "All categories are within normal range this heartbeat.";
+  }
+  const parts: string[] = [];
+  if (attention.length > 0) parts.push(`${attention.join(", ")} need attention`);
+  if (watch.length > 0) parts.push(`${watch.join(", ")} are worth watching`);
+  if (unknown.length > 0) parts.push(`${unknown.join(", ")} had no usable data this heartbeat`);
+  return parts.join("; ") + ".";
+}

@@ -47,6 +47,8 @@ import {
   HeartbeatHistoryEntry,
   INVENTORY_BASELINE_MAX_HEARTBEATS,
   getHeadlineMetric,
+  buildFallbackNarrativeEntry,
+  buildFallbackOverall,
   computeInventoryHealth,
   computeAgingInventory,
   computeSalesVelocity,
@@ -157,22 +159,41 @@ export async function runMarcusHeartbeatNow(now: Date = new Date()): Promise<Mar
 
   let narrative: MarcusNarrative;
   try {
-    const generated = await generateMarcusNarrative({
-      metrics,
-      severities,
-      deltas,
-      topMover,
-      rainContext,
-      isFirstHeartbeat,
-    });
+    const generated = await generateMarcusNarrative(
+      { metrics, severities, deltas, topMover, rainContext, isFirstHeartbeat },
+      CATEGORY_SLUGS
+    );
     narrative = generated.narrative;
   } catch (err) {
-    // Same graceful-degradation precedent as reports.ts's
-    // generateNarrativeSafely -- a broken narrative call never blocks the
-    // heartbeat; metrics/severities/deltas are already valid and get stored
-    // regardless.
-    console.error("[marcus] narrative generation failed:", err);
+    // generateMarcusNarrative already catches per-attempt failures
+    // internally and shouldn't throw -- this is a last-resort safety net so
+    // an unexpected error here still leaves every category to be filled by
+    // the deterministic fallback pass below, rather than blocking the
+    // heartbeat entirely.
+    console.error("[marcus] narrative generation failed unexpectedly:", err);
     narrative = { overall: "", categories: {}, parse_ok: false };
+  }
+
+  // Hard guarantee: every category gets a non-empty explanation +
+  // recommendation, every heartbeat, no exceptions. generateMarcusNarrative
+  // already gave the AI several attempts and validated its output -- for
+  // whatever didn't come back complete (a specific category, or the overall
+  // paragraph), fill it in deterministically from that category's own
+  // already-computed metrics/severity (never a further AI call). A category
+  // with no usable data (severity "unknown") gets a fallback that says why,
+  // not a blank.
+  for (const slug of CATEGORY_SLUGS) {
+    const entry = narrative.categories[slug];
+    const isUsable = entry && entry.explanation.trim() !== "" && entry.recommendation.trim() !== "";
+    if (!isUsable) {
+      narrative.categories[slug] = {
+        ...buildFallbackNarrativeEntry(slug, metrics[slug] as Record<string, unknown> | null, severities[slug]),
+        source: "fallback",
+      };
+    }
+  }
+  if (narrative.overall.trim() === "") {
+    narrative.overall = buildFallbackOverall(severities);
   }
 
   const status: MarcusHeartbeatStatus = anyFailed ? "partial_error" : "ok";

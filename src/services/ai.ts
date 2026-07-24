@@ -413,7 +413,7 @@ Output format:
 
 export interface MarcusNarrative {
   overall: string;
-  categories: Record<string, { explanation: string; recommendation: string }>;
+  categories: Record<string, { explanation: string; recommendation: string; source: "ai" | "fallback" }>;
   parse_ok: boolean;
 }
 
@@ -426,16 +426,40 @@ export interface MarcusNarrativeInput {
   isFirstHeartbeat: boolean;
 }
 
+// Marcus's whole purpose is telling the business what to do -- a category
+// silently missing its recommendation because the model dropped a key on a
+// given call isn't acceptable, so this is retried a few times rather than
+// accepted on the first (possibly incomplete) response.
+const MARCUS_NARRATIVE_MAX_ATTEMPTS = 3;
+
 /**
- * Never throws on a malformed model response -- falls back to
- * { overall: <raw text>, categories: {}, parse_ok: false } so a narrative-
- * formatting problem can never fail the heartbeat itself (metrics/severities
- * are already valid and get stored regardless, see jobs/marcus.ts). Only a
- * genuine chatCompletion failure (missing/invalid SUMMARIZER_API_KEY, a
- * failed request) throws, same as generateReportNarrative.
+ * Never throws -- a genuine chatCompletion failure (missing/invalid
+ * SUMMARIZER_API_KEY, a failed request) is caught per-attempt and simply
+ * counts as a failed attempt, not a thrown error, so it doesn't need a
+ * caller-side try/catch the way generateReportNarrative does.
+ *
+ * Retries up to MARCUS_NARRATIVE_MAX_ATTEMPTS times, accumulating partial
+ * credit across attempts: a category entry accepted on attempt 1 is kept
+ * even if attempt 2's response omits or garbles that same category, so the
+ * final result is the union of every attempt's valid entries, not just the
+ * last attempt's. Stops early once every entry in `categorySlugs` has a
+ * validated (non-empty explanation + recommendation) entry and `overall` is
+ * non-empty -- that's what `parse_ok: true` means here: the AI alone
+ * produced a fully complete narrative, no fallback needed anywhere.
+ *
+ * If attempts run out still incomplete, returns whatever was validated
+ * (parse_ok: false) rather than discarding it -- jobs/marcus.ts fills any
+ * remaining gaps with a deterministic, code-written fallback built from that
+ * category's own already-computed metrics/severity (see
+ * marcusCategories.ts#buildFallbackNarrativeEntry), never a further AI call.
+ * This function's job ends at "give the AI a fair shot, validate, don't
+ * invent completeness that isn't there" -- the hard guarantee that a
+ * heartbeat never finishes with a category's narrative genuinely empty is
+ * enforced one layer up.
  */
 export async function generateMarcusNarrative(
-  input: MarcusNarrativeInput
+  input: MarcusNarrativeInput,
+  categorySlugs: readonly string[]
 ): Promise<{ narrative: MarcusNarrative; usage?: TokenUsage }> {
   const userContent = JSON.stringify({
     metrics: input.metrics,
@@ -446,45 +470,65 @@ export async function generateMarcusNarrative(
     is_first_heartbeat: input.isFirstHeartbeat,
   });
 
-  const { text, usage } = await chatCompletion(
-    MARCUS_NARRATIVE_SYSTEM_PROMPT,
-    userContent,
-    2500,
-    process.env.SUMMARIZER_API_KEY,
-    process.env.SUMMARIZER_MODEL || "gpt-5"
-  );
-  console.log("[marcus] narrative response:", text);
+  let overall = "";
+  const categories: Record<string, { explanation: string; recommendation: string; source: "ai" }> = {};
+  let usage: TokenUsage | undefined;
 
-  const fallback = (): { narrative: MarcusNarrative; usage?: TokenUsage } => ({
-    narrative: { overall: stripTrailingOffer(text.trim()), categories: {}, parse_ok: false },
-    usage,
-  });
+  const isComplete = () => overall !== "" && categorySlugs.every((slug) => categories[slug] !== undefined);
 
-  const cleaned = text.replace(/```(?:json)?/gi, "").trim();
-  const match = cleaned.match(/\{[\s\S]*\}/);
-  if (!match) return fallback();
+  for (let attempt = 1; attempt <= MARCUS_NARRATIVE_MAX_ATTEMPTS && !isComplete(); attempt++) {
+    let text: string;
+    try {
+      const response = await chatCompletion(
+        MARCUS_NARRATIVE_SYSTEM_PROMPT,
+        userContent,
+        2500,
+        process.env.SUMMARIZER_API_KEY,
+        process.env.SUMMARIZER_MODEL || "gpt-5"
+      );
+      text = response.text;
+      usage = response.usage;
+    } catch (err) {
+      console.error(`[marcus] narrative call failed on attempt ${attempt}/${MARCUS_NARRATIVE_MAX_ATTEMPTS}:`, err);
+      continue;
+    }
+    console.log(`[marcus] narrative response (attempt ${attempt}/${MARCUS_NARRATIVE_MAX_ATTEMPTS}):`, text);
 
-  let parsed: any;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    return fallback();
-  }
-  if (typeof parsed?.overall !== "string" || typeof parsed?.categories !== "object" || parsed.categories === null) {
-    return fallback();
-  }
+    const cleaned = text.replace(/```(?:json)?/gi, "").trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) continue;
 
-  const categories: Record<string, { explanation: string; recommendation: string }> = {};
-  for (const [slug, value] of Object.entries(parsed.categories)) {
-    if (!value || typeof (value as any).explanation !== "string") continue;
-    categories[slug] = {
-      explanation: stripTrailingOffer(String((value as any).explanation).trim()),
-      recommendation: stripTrailingOffer(String((value as any).recommendation ?? "").trim()),
-    };
+    let parsed: any;
+    try {
+      parsed = JSON.parse(match[0]);
+    } catch {
+      continue;
+    }
+
+    if (overall === "" && typeof parsed?.overall === "string" && parsed.overall.trim() !== "") {
+      overall = stripTrailingOffer(parsed.overall.trim());
+    }
+    if (typeof parsed?.categories === "object" && parsed.categories !== null) {
+      for (const slug of categorySlugs) {
+        if (categories[slug]) continue; // already validated from an earlier attempt
+        const entry = (parsed.categories as any)[slug];
+        if (
+          entry &&
+          typeof entry.explanation === "string" && entry.explanation.trim() !== "" &&
+          typeof entry.recommendation === "string" && entry.recommendation.trim() !== ""
+        ) {
+          categories[slug] = {
+            explanation: stripTrailingOffer(String(entry.explanation).trim()),
+            recommendation: stripTrailingOffer(String(entry.recommendation).trim()),
+            source: "ai",
+          };
+        }
+      }
+    }
   }
 
   return {
-    narrative: { overall: stripTrailingOffer(parsed.overall.trim()), categories, parse_ok: true },
+    narrative: { overall, categories, parse_ok: isComplete() },
     usage,
   };
 }
