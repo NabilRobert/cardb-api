@@ -49,6 +49,7 @@ import {
   getAgingInventoryCandidates,
   getStnkExpiryCandidates,
   getSalesVelocityStats,
+  getSalesVelocityByGroup,
 } from "../db";
 import { AGING_TIERS, AGING_TIER_RANK, STNK_EXPIRY_WINDOW_DAYS } from "../jobs/notifications";
 import { askQuestion } from "./ai";
@@ -129,6 +130,29 @@ function groupKey(brand: string, modelTrim: string): string {
 
 // ---------------------------------------------------------------------------
 // 1. inventory_health -- direct reuse
+//
+// `groups`: a snapshot of the CURRENT available count for every brand +
+// model_trim combination (key format "Brand :: ModelTrim", see groupKey
+// above) -- not a ranking, not filtered, every group with at least one
+// available unit is in here.
+//
+// `worst_group` / `worst_ratio`: the group whose current count has fallen
+// furthest, PROPORTIONALLY, below ITS OWN trailing average (current count /
+// that group's mean count across up to INVENTORY_BASELINE_MAX_HEARTBEATS
+// prior heartbeats). This is a relative-decline metric, not a size ranking
+// -- worst_group is often a small-count group (a group that normally only
+// ever has 1-2 units can "fall 50% below baseline" the same way a
+// 40-unit group can), and is NOT the group with the highest or lowest
+// absolute count. worst_ratio of 1.0 means "unchanged from its own
+// baseline" (not "healthy" in an absolute sense, just flat) -- with only a
+// handful of heartbeats of history so far, many groups will tie at exactly
+// 1.0 (flat) or whatever their only prior data point was, and ties are
+// broken arbitrarily by whichever group Postgres happens to return first
+// (no ORDER BY on the underlying query) -- this arbitrariness fades out as
+// more heartbeats accumulate and baselines become real averages rather than
+// single data points. worst_group_current_count/worst_group_baseline_count
+// are included specifically so the frontend can show the real numbers
+// behind the ratio instead of just the ratio.
 // ---------------------------------------------------------------------------
 export async function computeInventoryHealth(history: HeartbeatHistoryEntry[]): Promise<CategoryResult> {
   const current = await getAvailableCountsByGroup();
@@ -138,6 +162,8 @@ export async function computeInventoryHealth(history: HeartbeatHistoryEntry[]): 
   const insufficientHistory = history.length === 0;
   let worstGroup: string | null = null;
   let worstRatio = Infinity;
+  let worstGroupCurrentCount: number | null = null;
+  let worstGroupBaselineCount: number | null = null;
 
   if (!insufficientHistory) {
     const historicalValues = new Map<string, number[]>();
@@ -160,6 +186,8 @@ export async function computeInventoryHealth(history: HeartbeatHistoryEntry[]): 
       if (ratio < worstRatio) {
         worstRatio = ratio;
         worstGroup = key;
+        worstGroupCurrentCount = currentCount;
+        worstGroupBaselineCount = baseline;
       }
     }
   }
@@ -182,7 +210,13 @@ export async function computeInventoryHealth(history: HeartbeatHistoryEntry[]): 
   }
 
   return {
-    metrics: { groups: groupsOut, worst_group: worstGroup, worst_ratio: worstGroup ? worstRatio : null },
+    metrics: {
+      groups: groupsOut,
+      worst_group: worstGroup,
+      worst_ratio: worstGroup ? worstRatio : null,
+      worst_group_current_count: worstGroupCurrentCount,
+      worst_group_baseline_count: worstGroupBaselineCount,
+    },
     severity,
   };
 }
@@ -210,6 +244,10 @@ export async function computeAgingInventory(history: HeartbeatHistoryEntry[]): P
     }
   }
   const avgAgeDays = candidates.length > 0 ? totalDays / candidates.length : 0;
+  // Oldest first -- these are the ones worth discounting or pushing first;
+  // the narrative names specific vehicles from this list rather than just
+  // reporting the bucket counts.
+  const oldestFirst = [...candidates].sort((a, b) => b.days_on_lot - a.days_on_lot);
 
   // Map notifications.ts's notice/warning/critical vocabulary onto Marcus's ok/watch/attention.
   const baseSeverity: SeverityLevel =
@@ -238,7 +276,7 @@ export async function computeAgingInventory(history: HeartbeatHistoryEntry[]): P
   }
 
   return {
-    metrics: { buckets, avg_age_days: avgAgeDays, candidate_count: candidates.length },
+    metrics: { buckets, avg_age_days: avgAgeDays, candidate_count: candidates.length, vehicles: oldestFirst.slice(0, 20) },
     severity,
   };
 }
@@ -248,7 +286,7 @@ export async function computeAgingInventory(history: HeartbeatHistoryEntry[]): P
 // confirmed split, see file doc comment above)
 // ---------------------------------------------------------------------------
 export async function computeSalesVelocity(): Promise<CategoryResult> {
-  const stats = await getSalesVelocityStats();
+  const [stats, byGroup] = await Promise.all([getSalesVelocityStats(), getSalesVelocityByGroup()]);
   const totalThisWeek = stats.sold_this_week + stats.booked_this_week;
   const trailingAvgSoldPerWeek = stats.sold_trailing_4weeks / 4;
 
@@ -272,6 +310,10 @@ export async function computeSalesVelocity(): Promise<CategoryResult> {
       booked_this_week: stats.booked_this_week,
       total_this_week: totalThisWeek,
       trailing_4week_avg_sold_per_week: trailingAvgSoldPerWeek,
+      // Per brand/model breakdown of this week's activity (non-zero groups
+      // only) -- lets the narrative judge whether a shortfall is broad
+      // (many small groups) or concentrated (one or two groups dominate).
+      by_group: byGroup,
     },
     severity,
   };
@@ -285,6 +327,9 @@ export async function computeStnkCompliance(): Promise<CategoryResult> {
   const candidates = await getStnkExpiryCandidates(STNK_EXPIRY_WINDOW_DAYS);
   const expiredCount = candidates.filter((c) => c.days_diff < 0).length;
   const expiringSoonCount = candidates.length - expiredCount;
+  // Most overdue first (most-negative days_diff), then soonest-to-expire --
+  // the narrative prioritizes off this order when naming which to renew first.
+  const prioritized = [...candidates].sort((a, b) => a.days_diff - b.days_diff);
 
   let severity: CategorySeverity;
   if (candidates.length === 0) {
@@ -301,7 +346,7 @@ export async function computeStnkCompliance(): Promise<CategoryResult> {
       expired_count: expiredCount,
       expiring_soon_count: expiringSoonCount,
       total_count: candidates.length,
-      vehicles: candidates.slice(0, 20),
+      vehicles: prioritized.slice(0, 20),
     },
     severity,
   };
@@ -361,9 +406,22 @@ export async function computePricingSignals(): Promise<CategoryResult> {
 }
 
 // ---------------------------------------------------------------------------
-// 6. data_hygiene -- AI pipeline
+// 6. data_hygiene -- AI pipeline. Asks for the raw field values rather than
+// AI-computed counts/booleans -- missing-ness is then decided in plain code
+// from those values (same "AI only fetches, code decides" discipline as
+// severity everywhere else), and doubles as the source for the per-vehicle
+// `vehicles`/missing_fields list the frontend needs to link to specific
+// records instead of just a total.
 // ---------------------------------------------------------------------------
-const DATA_HYGIENE_QUESTION = `Among available vehicles, count how many have price_cash, price_credit, AND price_net all null (as missing_price_count), how many have stnk_expiry_date null (as missing_stnk_count), and how many have purchase_date null (as missing_purchase_date_count). Return exactly one row with those three columns.`;
+const DATA_HYGIENE_QUESTION = `List available vehicles that are missing at least one of these required fields: price_cash, price_credit, and price_net (all three null counts as a missing price), stnk_expiry_date, or purchase_date. Return id, brand, model_trim, license_plate, price_cash, price_credit, price_net, stnk_expiry_date, and purchase_date for each.`;
+
+export interface DataHygieneVehicle {
+  id: number;
+  license_plate: string | null;
+  brand: string | null;
+  model_trim: string | null;
+  missing_fields: string[];
+}
 
 export async function computeDataHygiene(): Promise<CategoryResult> {
   const result = await askQuestion(DATA_HYGIENE_QUESTION);
@@ -371,23 +429,67 @@ export async function computeDataHygiene(): Promise<CategoryResult> {
     return { metrics: null, severity: { severity: "unknown", note: result.message } };
   }
 
-  const row = result.rows[0] ?? {};
-  const missingPrice = toNumber(row.missing_price_count) ?? 0;
-  const missingStnk = toNumber(row.missing_stnk_count) ?? 0;
-  const missingPurchaseDate = toNumber(row.missing_purchase_date_count) ?? 0;
-  const total = missingPrice + missingStnk + missingPurchaseDate;
+  let skipped = 0;
+  const vehicles: DataHygieneVehicle[] = [];
+  for (const row of result.rows) {
+    const id = toNumber(row.id);
+    if (id === null) {
+      skipped++;
+      continue;
+    }
+
+    const missingFields: string[] = [];
+    const priceCash = toNumber(row.price_cash);
+    const priceCredit = toNumber(row.price_credit);
+    const priceNet = toNumber(row.price_net);
+    if (priceCash === null && priceCredit === null && priceNet === null) missingFields.push("price");
+    if (row.stnk_expiry_date === null || row.stnk_expiry_date === undefined) missingFields.push("stnk_expiry_date");
+    if (row.purchase_date === null || row.purchase_date === undefined) missingFields.push("purchase_date");
+
+    // The model may include a row that (per its own generated SQL) doesn't
+    // actually have any of the three fields missing -- don't report a
+    // vehicle with nothing wrong with it, just skip it.
+    if (missingFields.length === 0) {
+      skipped++;
+      continue;
+    }
+
+    vehicles.push({
+      id,
+      license_plate: typeof row.license_plate === "string" ? row.license_plate : null,
+      brand: typeof row.brand === "string" ? row.brand : null,
+      model_trim: typeof row.model_trim === "string" ? row.model_trim : null,
+      missing_fields: missingFields,
+    });
+  }
+
+  // Counted per distinct vehicle (a vehicle missing two fields counts once
+  // here, not twice) -- more intuitive than the old field-instance sum, but
+  // note this means it's <= what the old total would have been for the same
+  // data.
+  const missingPriceCount = vehicles.filter((v) => v.missing_fields.includes("price")).length;
+  const missingStnkCount = vehicles.filter((v) => v.missing_fields.includes("stnk_expiry_date")).length;
+  const missingPurchaseDateCount = vehicles.filter((v) => v.missing_fields.includes("purchase_date")).length;
+  const totalCount = vehicles.length;
 
   let severity: CategorySeverity;
-  if (total >= DATA_HYGIENE_ATTENTION_COUNT) {
-    severity = { severity: "attention", note: `${total} available vehicle field(s) missing required data.` };
-  } else if (total >= DATA_HYGIENE_WATCH_COUNT) {
-    severity = { severity: "watch", note: `${total} available vehicle field(s) missing required data.` };
+  if (totalCount >= DATA_HYGIENE_ATTENTION_COUNT) {
+    severity = { severity: "attention", note: `${totalCount} available vehicle(s) missing required data.`, skipped_rows: skipped || undefined };
+  } else if (totalCount >= DATA_HYGIENE_WATCH_COUNT) {
+    severity = { severity: "watch", note: `${totalCount} available vehicle(s) missing required data.`, skipped_rows: skipped || undefined };
   } else {
-    severity = { severity: "ok" };
+    severity = { severity: "ok", skipped_rows: skipped || undefined };
   }
 
   return {
-    metrics: { missing_price_count: missingPrice, missing_stnk_count: missingStnk, missing_purchase_date_count: missingPurchaseDate },
+    metrics: {
+      missing_price_count: missingPriceCount,
+      missing_stnk_count: missingStnkCount,
+      missing_purchase_date_count: missingPurchaseDateCount,
+      total_count: totalCount,
+      vehicles: vehicles.slice(0, 20),
+      skipped_rows: skipped,
+    },
     severity,
   };
 }
@@ -564,7 +666,7 @@ export function getHeadlineMetric(slug: CategorySlug, metrics: Record<string, un
     case "pricing_signals":
       return toNumber(metrics.outlier_count);
     case "data_hygiene":
-      return (toNumber(metrics.missing_price_count) ?? 0) + (toNumber(metrics.missing_stnk_count) ?? 0) + (toNumber(metrics.missing_purchase_date_count) ?? 0);
+      return toNumber(metrics.total_count);
     case "stalled_bookings":
       return toNumber(metrics.stalled_count);
     case "discount_drift":

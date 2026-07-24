@@ -631,6 +631,34 @@ export async function getSalesVelocityStats(): Promise<SalesVelocityStats> {
   return result.rows[0];
 }
 
+export interface SalesVelocityGroupStats {
+  brand: string;
+  model_trim: string;
+  sold_this_week: number;
+  booked_this_week: number;
+}
+
+// Per brand/model breakdown of this week's activity, only for groups with
+// at least one sale or booking -- lets Marcus's narrative tell whether a
+// sales_velocity dip is broad (many small groups) or concentrated (one or
+// two groups) instead of just reporting the aggregate total. Same rolling-
+// week/booked-via-updated_at caveats as getSalesVelocityStats above.
+export async function getSalesVelocityByGroup(): Promise<SalesVelocityGroupStats[]> {
+  const result = await pool.query(
+    `SELECT brand, model_trim,
+       COUNT(*) FILTER (WHERE status = 'sold' AND handover_date >= CURRENT_DATE - 7)::int AS sold_this_week,
+       COUNT(*) FILTER (WHERE status = 'booked' AND updated_at >= now() - interval '7 days')::int AS booked_this_week
+     FROM vehicles
+     WHERE brand IS NOT NULL AND model_trim IS NOT NULL
+     GROUP BY brand, model_trim
+     HAVING COUNT(*) FILTER (
+       WHERE (status = 'sold' AND handover_date >= CURRENT_DATE - 7)
+          OR (status = 'booked' AND updated_at >= now() - interval '7 days')
+     ) > 0`
+  );
+  return result.rows;
+}
+
 // ---------------------------------------------------------------------------
 // scheduled_reports -- recurring "Ask AI" questions. See reports.ts for the
 // job that decides what's due and runs it through ai.ts#askQuestion (the
