@@ -16,6 +16,7 @@ import authRouter from "./auth";
 import apiKeysRouter from "./apiKeys";
 import notificationsRouter from "./notifications";
 import scheduledReportsRouter from "./scheduledReports";
+import marcusRouter from "./marcus";
 
 const router = Router();
 
@@ -30,5 +31,6 @@ router.use("/ask", askRouter);
 router.use("/templates", templatesRouter);
 router.use("/notifications", notificationsRouter);
 router.use("/scheduled-reports", scheduledReportsRouter);
+router.use("/marcus", marcusRouter);
 
 export default router;

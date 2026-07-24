@@ -375,6 +375,182 @@ function stripTrailingOffer(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Marcus (Phase 9) -- the narrative layer for the whole-business heartbeat
+// (see jobs/marcus.ts, services/marcusCategories.ts). Two calls:
+//   - generateMarcusNarrative: same dedicated model as generateReportNarrative
+//     above (SUMMARIZER_API_KEY/SUMMARIZER_MODEL), turns the 9 categories'
+//     already-computed metrics/severities/deltas/top-mover/rain-context into
+//     a short grounded explanation + recommendation per category.
+//   - answerMarcusFollowUp: back on the cheaper gpt-5-mini/SUMOPOD_API_KEY --
+//     a single mechanical grounded lookup over one frozen heartbeat's
+//     already-serialized JSON, closer in cost/shape to askQuestion than to a
+//     prose-writing job. No SQL generation, no sanitizeSql involved.
+// ---------------------------------------------------------------------------
+
+const MARCUS_NARRATIVE_SYSTEM_PROMPT = `You write the narrative layer of Marcus, a proactive whole-business heartbeat for a used-car dealership's inventory. Each run you're given the already-computed numbers, severities, since-last-heartbeat deltas, and top mover across 9 fixed categories, plus recent findings from separately-scheduled reports ("rain_context") -- your job is to explain what's there in plain prose: one short explanation and one recommendation per category, plus one overall paragraph.
+
+Grounding (most important rule -- follow this above all the rest):
+- Only rephrase and aggregate what is actually present in the JSON you are given. Never introduce a vehicle, count, price, date, brand, percentage, or any other fact that isn't literally in that JSON, and never guess, estimate, or infer beyond it.
+- A category whose severity is "unknown" has no usable data this heartbeat -- say only that plainly, do not speculate about what the number might have been.
+- A category marked insufficient_history is on its first heartbeat -- do not claim a trend, increase, or decrease exists for it.
+- If rain_context lists a recent scheduled report that already covers ground a category touches on, reference it briefly ("as this week's Sales Pipeline report showed...") instead of re-deriving the same numbers independently.
+- If is_first_heartbeat is true, do not describe any change over time at all for any category.
+
+Recommendations -- each category's "recommendation" must be a concrete NEXT ACTION grounded in that category's own data (name the specific vehicles/plates/models/numbers given, never invent one that isn't in the JSON), not a restatement of the explanation. If a category's severity is "ok" and there is genuinely nothing to do, say so plainly (e.g. "No action needed this heartbeat.") rather than manufacturing a recommendation -- an honest "nothing to do" beats a padded one. Per category:
+- aging_inventory: metrics.aging_inventory.vehicles is sorted oldest-first (id, license_plate, brand, model_trim, days_on_lot). Name the specific vehicles worth discounting or pushing first, and say how far past the normal range they are (aging tiers: notice at 60 days on lot, warning at 90, critical at 120 -- e.g. "40 days past the 90-day warning tier").
+- stnk_compliance: metrics.stnk_compliance.vehicles is sorted most-overdue-first (negative days_diff = already expired, comes before expiring-soon). Name which specific vehicles need renewal first and how overdue (or how soon) each one is.
+- sales_velocity: metrics.sales_velocity.by_group lists this week's sold/booked activity per brand+model (only groups with nonzero activity). If the total is down, say whether that shortfall looks broad (many groups each contributing a little) or concentrated (one or two groups account for most of it) -- that distinction is what tells the reader whether to look at marketing, pricing, or just wait it out. Don't recommend investigating a specific cause unless the by_group breakdown actually points that way.
+- data_hygiene: metrics.data_hygiene.vehicles lists which vehicles are missing which fields (missing_fields, e.g. ["price","stnk_expiry_date"]). Name specific vehicles and what's missing on each, so they can be fixed first.
+- discount_drift: state plainly, using the given avg_gap_pct and its delta, whether the discount gap has widened enough that pricing policy is worth reviewing, or whether it's stable/within normal range.
+- pricing_signals: metrics.pricing_signals.outliers lists specific vehicles and how far off their group's median price_net they are. Name the worst ones.
+- stalled_bookings: metrics.stalled_bookings.stalled lists specific bookings with days_booked. Name which ones are stale enough to follow up on, and whether any look stale enough to consider releasing back to available (stalled bookings are flagged for follow-up past 14 days, and past 30 days are worth considering for release).
+- inventory_health / financial_snapshot: these are often purely informational. Only recommend an action if severity is watch/attention; otherwise say plainly that nothing here needs attention this heartbeat.
+
+Output format:
+- Respond with ONLY a single JSON object of the shape {"overall": "<1-2 sentence paragraph>", "categories": {"<category_slug>": {"explanation": "<1-2 sentences>", "recommendation": "<1 concrete sentence, or a plain statement that no action is needed>"}, ...}} -- one entry per category slug present in the given metrics, no markdown, no code fences, no other text before or after the JSON object.
+- Plain prose sentences only inside each string value -- no bullets, no headers, no line breaks.
+- Never end any string value with a conversational offer or question ("let me know if...", "would you like..."). This is a stored record, not a conversation.`;
+
+export interface MarcusNarrative {
+  overall: string;
+  categories: Record<string, { explanation: string; recommendation: string; source: "ai" | "fallback" }>;
+  parse_ok: boolean;
+}
+
+export interface MarcusNarrativeInput {
+  metrics: Record<string, unknown>;
+  severities: Record<string, unknown>;
+  deltas: Record<string, unknown>;
+  topMover: Record<string, unknown> | null;
+  rainContext: unknown[];
+  isFirstHeartbeat: boolean;
+}
+
+// Marcus's whole purpose is telling the business what to do -- a category
+// silently missing its recommendation because the model dropped a key on a
+// given call isn't acceptable, so this is retried a few times rather than
+// accepted on the first (possibly incomplete) response.
+const MARCUS_NARRATIVE_MAX_ATTEMPTS = 3;
+
+/**
+ * Never throws -- a genuine chatCompletion failure (missing/invalid
+ * SUMMARIZER_API_KEY, a failed request) is caught per-attempt and simply
+ * counts as a failed attempt, not a thrown error, so it doesn't need a
+ * caller-side try/catch the way generateReportNarrative does.
+ *
+ * Retries up to MARCUS_NARRATIVE_MAX_ATTEMPTS times, accumulating partial
+ * credit across attempts: a category entry accepted on attempt 1 is kept
+ * even if attempt 2's response omits or garbles that same category, so the
+ * final result is the union of every attempt's valid entries, not just the
+ * last attempt's. Stops early once every entry in `categorySlugs` has a
+ * validated (non-empty explanation + recommendation) entry and `overall` is
+ * non-empty -- that's what `parse_ok: true` means here: the AI alone
+ * produced a fully complete narrative, no fallback needed anywhere.
+ *
+ * If attempts run out still incomplete, returns whatever was validated
+ * (parse_ok: false) rather than discarding it -- jobs/marcus.ts fills any
+ * remaining gaps with a deterministic, code-written fallback built from that
+ * category's own already-computed metrics/severity (see
+ * marcusCategories.ts#buildFallbackNarrativeEntry), never a further AI call.
+ * This function's job ends at "give the AI a fair shot, validate, don't
+ * invent completeness that isn't there" -- the hard guarantee that a
+ * heartbeat never finishes with a category's narrative genuinely empty is
+ * enforced one layer up.
+ */
+export async function generateMarcusNarrative(
+  input: MarcusNarrativeInput,
+  categorySlugs: readonly string[]
+): Promise<{ narrative: MarcusNarrative; usage?: TokenUsage }> {
+  const userContent = JSON.stringify({
+    metrics: input.metrics,
+    severities: input.severities,
+    deltas: input.deltas,
+    top_mover: input.topMover,
+    rain_context: input.rainContext,
+    is_first_heartbeat: input.isFirstHeartbeat,
+  });
+
+  let overall = "";
+  const categories: Record<string, { explanation: string; recommendation: string; source: "ai" }> = {};
+  let usage: TokenUsage | undefined;
+
+  const isComplete = () => overall !== "" && categorySlugs.every((slug) => categories[slug] !== undefined);
+
+  for (let attempt = 1; attempt <= MARCUS_NARRATIVE_MAX_ATTEMPTS && !isComplete(); attempt++) {
+    let text: string;
+    try {
+      const response = await chatCompletion(
+        MARCUS_NARRATIVE_SYSTEM_PROMPT,
+        userContent,
+        2500,
+        process.env.SUMMARIZER_API_KEY,
+        process.env.SUMMARIZER_MODEL || "gpt-5"
+      );
+      text = response.text;
+      usage = response.usage;
+    } catch (err) {
+      console.error(`[marcus] narrative call failed on attempt ${attempt}/${MARCUS_NARRATIVE_MAX_ATTEMPTS}:`, err);
+      continue;
+    }
+    console.log(`[marcus] narrative response (attempt ${attempt}/${MARCUS_NARRATIVE_MAX_ATTEMPTS}):`, text);
+
+    const cleaned = text.replace(/```(?:json)?/gi, "").trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) continue;
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(match[0]);
+    } catch {
+      continue;
+    }
+
+    if (overall === "" && typeof parsed?.overall === "string" && parsed.overall.trim() !== "") {
+      overall = stripTrailingOffer(parsed.overall.trim());
+    }
+    if (typeof parsed?.categories === "object" && parsed.categories !== null) {
+      for (const slug of categorySlugs) {
+        if (categories[slug]) continue; // already validated from an earlier attempt
+        const entry = (parsed.categories as any)[slug];
+        if (
+          entry &&
+          typeof entry.explanation === "string" && entry.explanation.trim() !== "" &&
+          typeof entry.recommendation === "string" && entry.recommendation.trim() !== ""
+        ) {
+          categories[slug] = {
+            explanation: stripTrailingOffer(String(entry.explanation).trim()),
+            recommendation: stripTrailingOffer(String(entry.recommendation).trim()),
+            source: "ai",
+          };
+        }
+      }
+    }
+  }
+
+  return {
+    narrative: { overall, categories, parse_ok: isComplete() },
+    usage,
+  };
+}
+
+const MARCUS_FOLLOWUP_SYSTEM_PROMPT = `You answer follow-up questions about one specific past Marcus heartbeat -- a frozen, already-computed snapshot of a used-car dealership's inventory health. You are given that snapshot's metrics, severities, and narrative as JSON, and a question about it.
+
+Grounding (most important rule):
+- Answer using only the JSON snapshot given below. This is a frozen record of a past check -- do not attempt to re-investigate the database, assume anything has changed since, or introduce any fact not present in the JSON.
+- If the JSON doesn't contain enough information to answer, say so plainly rather than guessing.
+
+Respond with a few plain sentences, no markdown, no bullets, no trailing conversational offer or question.`;
+
+export async function answerMarcusFollowUp(
+  snapshot: { metrics: Record<string, unknown>; severities: Record<string, unknown>; narrative: Record<string, unknown> },
+  question: string
+): Promise<{ text: string; usage?: TokenUsage }> {
+  const userContent = `Snapshot (JSON):\n${JSON.stringify(snapshot)}\n\nQuestion: ${question}`;
+  const { text, usage } = await chatCompletion(MARCUS_FOLLOWUP_SYSTEM_PROMPT, userContent);
+  return { text: stripTrailingOffer(text.trim()), usage };
+}
+
+// ---------------------------------------------------------------------------
 // Column-mapping proposal for unrecognized import formats (see templates.ts
 // and routes/upload.ts). Same one-call, no-second-guessing design as
 // askQuestion above: one cheap SumoPod call per unrecognized sheet, never

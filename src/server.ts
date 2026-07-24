@@ -27,8 +27,30 @@
  *   - POST /api/notifications/:id/read     mark one as read
  *   - GET/POST /api/scheduled-reports      list/create recurring "Ask AI" questions (see reports.ts)
  *   - PATCH/DELETE /api/scheduled-reports/:id   edit (incl. enable/disable) or remove one
+ *   - GET/PATCH /api/marcus/config          read/update Marcus's heartbeat cadence (see jobs/marcus.ts)
+ *   - POST /api/marcus/run-now              run a Marcus heartbeat immediately, same code the cron job uses
+ *   - GET  /api/marcus/heartbeats           Marcus's Archive -- past heartbeats, lightweight list (paginated)
+ *   - GET  /api/marcus/heartbeats/:id       one heartbeat in full (metrics/severities/deltas/top_mover/narrative)
+ *   - POST /api/marcus/heartbeats/:id/ask   follow-up Q&A grounded in one frozen heartbeat's data, not fresh SQL
  *
  * Route handlers live in routes/ (one file per resource, see routes/index.ts).
+ *
+ * Phase 9 -- Marcus: a proactive whole-business heartbeat, distinct from
+ * /api/ask (one question at a time, on demand) and /api/scheduled-reports
+ * (one fixed topic each, re-run on a schedule). Every heartbeat computes 9
+ * fixed categories (see services/marcusCategories.ts) on its own
+ * configurable cadence (marcus_config, evaluated against Asia/Jakarta via
+ * the same cron infra as scheduled reports -- see jobs/marcus.ts),
+ * severities always decided in plain code afterward, never by the AI. Every
+ * heartbeat's full numeric snapshot is stored immutably in
+ * marcus_heartbeats (Marcus's Archive) alongside a grounded AI narrative
+ * layer (services/ai.ts#generateMarcusNarrative, the same dedicated
+ * SUMMARIZER model as the scheduled-report narrative below) that also
+ * references recently-answered Scheduled Reports ("rain-awareness") instead
+ * of repeating them. Lives entirely under /api/marcus/* (routes/marcus.ts),
+ * fully separate from /api/ask's and /api/scheduled-reports's route files
+ * even though the categories with no existing bespoke query reuse
+ * ai.ts#askQuestion, the same question-to-SQL pipeline those two use.
  *
  * Phase 8 -- real per-account API keys: every data route (middleware/
  * requireAuth.ts and middleware/apiKey.ts, now identical -- see
@@ -41,8 +63,8 @@
  * matching, non-revoked row in api_keys -- there is no static API_KEY env
  * var anymore, and no unauthenticated endpoint ever returns a usable key.
  * This file also starts scheduler.ts's background jobs (nightly
- * notifications, and a per-minute due-check for scheduled reports)
- * alongside the HTTP server.
+ * notifications, and a per-minute due-check for scheduled reports and for
+ * Marcus's heartbeat) alongside the HTTP server.
  *
  * Requires DATABASE_URL, SESSION_SECRET, and SUMOPOD_API_KEY in .env.
  * SUMMARIZER_API_KEY (and optionally SUMMARIZER_MODEL, defaults to "gpt-5")

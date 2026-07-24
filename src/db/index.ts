@@ -604,6 +604,61 @@ export async function getAgingInventoryCandidates(minDays: number): Promise<Agin
   return result.rows;
 }
 
+export interface SalesVelocityStats {
+  sold_this_week: number;
+  booked_this_week: number;
+  sold_trailing_4weeks: number;
+}
+
+// Powers services/marcusCategories.ts's sales_velocity category. Fully
+// deterministic, one query -- deliberately NOT routed through the
+// question-to-SQL AI pipeline, unlike Marcus's other non-reused categories,
+// since real dated columns (handover_date) make this unambiguous. Trailing
+// windows are rolling (from CURRENT_DATE), not calendar weeks, so the
+// figure doesn't skew depending on which day of the week the heartbeat runs.
+// booked_this_week uses updated_at as a proxy for "became booked" -- there's
+// no dedicated booking-date column, so an unrelated edit to an already-
+// booked vehicle this week would be miscounted (documented limitation, see
+// marcusCategories.ts).
+export async function getSalesVelocityStats(): Promise<SalesVelocityStats> {
+  const result = await pool.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE status = 'sold' AND handover_date >= CURRENT_DATE - 7)::int AS sold_this_week,
+       COUNT(*) FILTER (WHERE status = 'booked' AND updated_at >= now() - interval '7 days')::int AS booked_this_week,
+       COUNT(*) FILTER (WHERE status = 'sold' AND handover_date >= CURRENT_DATE - 35 AND handover_date < CURRENT_DATE - 7)::int AS sold_trailing_4weeks
+     FROM vehicles`
+  );
+  return result.rows[0];
+}
+
+export interface SalesVelocityGroupStats {
+  brand: string;
+  model_trim: string;
+  sold_this_week: number;
+  booked_this_week: number;
+}
+
+// Per brand/model breakdown of this week's activity, only for groups with
+// at least one sale or booking -- lets Marcus's narrative tell whether a
+// sales_velocity dip is broad (many small groups) or concentrated (one or
+// two groups) instead of just reporting the aggregate total. Same rolling-
+// week/booked-via-updated_at caveats as getSalesVelocityStats above.
+export async function getSalesVelocityByGroup(): Promise<SalesVelocityGroupStats[]> {
+  const result = await pool.query(
+    `SELECT brand, model_trim,
+       COUNT(*) FILTER (WHERE status = 'sold' AND handover_date >= CURRENT_DATE - 7)::int AS sold_this_week,
+       COUNT(*) FILTER (WHERE status = 'booked' AND updated_at >= now() - interval '7 days')::int AS booked_this_week
+     FROM vehicles
+     WHERE brand IS NOT NULL AND model_trim IS NOT NULL
+     GROUP BY brand, model_trim
+     HAVING COUNT(*) FILTER (
+       WHERE (status = 'sold' AND handover_date >= CURRENT_DATE - 7)
+          OR (status = 'booked' AND updated_at >= now() - interval '7 days')
+     ) > 0`
+  );
+  return result.rows;
+}
+
 // ---------------------------------------------------------------------------
 // scheduled_reports -- recurring "Ask AI" questions. See reports.ts for the
 // job that decides what's due and runs it through ai.ts#askQuestion (the
@@ -880,4 +935,182 @@ export async function findApiKeyByHash(keyHash: string): Promise<{ id: number; a
 // failure risk to an otherwise-valid request.
 export async function touchApiKeyLastUsed(id: number): Promise<void> {
   await pool.query("UPDATE api_keys SET last_used_at = now() WHERE id = $1", [id]);
+}
+
+// ---------------------------------------------------------------------------
+// marcus_config / marcus_heartbeats -- Phase 9: Marcus, the proactive
+// whole-business heartbeat (distinct from scheduled_reports, which re-runs
+// one fixed question). See services/marcusCategories.ts for the 9 category
+// computations, jobs/marcus.ts for scheduling/orchestration, and
+// routes/marcus.ts for the /api/marcus/* API.
+// ---------------------------------------------------------------------------
+
+export interface MarcusConfig {
+  id: 1;
+  schedule: string;
+  enabled: boolean;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const MARCUS_CONFIG_COLUMNS = ["id", "schedule", "enabled", "last_run_at", "created_at", "updated_at"] as const;
+const MARCUS_CONFIG_COLUMNS_SQL = MARCUS_CONFIG_COLUMNS.join(", ");
+
+// Always exactly one row -- id=1 is seeded by migration_add_marcus.sql and
+// enforced by that table's CHECK (id = 1) constraint.
+export async function getMarcusConfig(): Promise<MarcusConfig> {
+  const result = await pool.query(`SELECT ${MARCUS_CONFIG_COLUMNS_SQL} FROM marcus_config WHERE id = 1`);
+  return formatRowDates(result.rows[0]);
+}
+
+const MARCUS_CONFIG_EDITABLE_FIELDS = ["schedule", "enabled"] as const;
+
+export function isEditableMarcusConfigField(field: string): boolean {
+  return (MARCUS_CONFIG_EDITABLE_FIELDS as readonly string[]).includes(field);
+}
+
+export async function updateMarcusConfig(fields: Record<string, unknown>): Promise<MarcusConfig> {
+  const setClauses: string[] = [];
+  const params: any[] = [];
+  const push = (value: any) => {
+    params.push(value);
+    return `$${params.length}`;
+  };
+
+  for (const field of MARCUS_CONFIG_EDITABLE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(fields, field)) {
+      setClauses.push(`${field} = ${push(fields[field])}`);
+    }
+  }
+  setClauses.push("updated_at = now()");
+  const sql = `UPDATE marcus_config SET ${setClauses.join(", ")} WHERE id = 1 RETURNING ${MARCUS_CONFIG_COLUMNS_SQL}`;
+  const result = await pool.query(sql, params);
+  return formatRowDates(result.rows[0]);
+}
+
+export async function markMarcusConfigRun(ranAt: Date): Promise<void> {
+  await pool.query("UPDATE marcus_config SET last_run_at = $1 WHERE id = 1", [ranAt]);
+}
+
+export type MarcusHeartbeatStatus = "ok" | "partial_error";
+
+export interface MarcusHeartbeat {
+  id: number;
+  status: MarcusHeartbeatStatus;
+  metrics: Record<string, unknown>;
+  severities: Record<string, unknown>;
+  deltas: Record<string, unknown>;
+  top_mover: Record<string, unknown> | null;
+  rain_context: unknown[];
+  narrative: Record<string, unknown>;
+  created_at: string;
+}
+
+const MARCUS_HEARTBEAT_COLUMNS = [
+  "id", "status", "metrics", "severities", "deltas", "top_mover", "rain_context", "narrative", "created_at",
+] as const;
+const MARCUS_HEARTBEAT_COLUMNS_SQL = MARCUS_HEARTBEAT_COLUMNS.join(", ");
+
+export interface InsertMarcusHeartbeatInput {
+  status: MarcusHeartbeatStatus;
+  metrics: Record<string, unknown>;
+  severities: Record<string, unknown>;
+  deltas: Record<string, unknown>;
+  top_mover: Record<string, unknown> | null;
+  rain_context: unknown[];
+  narrative: Record<string, unknown>;
+}
+
+// marcus_heartbeats is append-only by design -- there is deliberately no
+// update/delete function here (see migration_add_marcus.sql's doc comment).
+export async function insertMarcusHeartbeat(input: InsertMarcusHeartbeatInput): Promise<MarcusHeartbeat> {
+  const result = await pool.query(
+    `INSERT INTO marcus_heartbeats (status, metrics, severities, deltas, top_mover, rain_context, narrative)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING ${MARCUS_HEARTBEAT_COLUMNS_SQL}`,
+    [
+      input.status,
+      JSON.stringify(input.metrics),
+      JSON.stringify(input.severities),
+      JSON.stringify(input.deltas),
+      input.top_mover !== null ? JSON.stringify(input.top_mover) : null,
+      JSON.stringify(input.rain_context),
+      JSON.stringify(input.narrative),
+    ]
+  );
+  return formatRowDates(result.rows[0]);
+}
+
+export interface MarcusHeartbeatListParams {
+  limit?: number;
+  offset?: number;
+}
+
+// Deliberately excludes metrics/narrative (the heavy columns) -- a lower
+// default/max than report_runs' 100/500 convention since even without those
+// two, severities across 9 categories is a nontrivial payload per row.
+export async function listMarcusHeartbeatsLight(params: MarcusHeartbeatListParams) {
+  const limit = Math.min(Math.max(params.limit ?? 20, 1), 100);
+  const offset = Math.max(params.offset ?? 0, 0);
+  const result = await pool.query(
+    `SELECT id, created_at, status, severities, top_mover FROM marcus_heartbeats ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+    [limit, offset]
+  );
+  return result.rows.map(formatRowDates);
+}
+
+export async function getMarcusHeartbeatById(id: number): Promise<MarcusHeartbeat | null> {
+  const result = await pool.query(
+    `SELECT ${MARCUS_HEARTBEAT_COLUMNS_SQL} FROM marcus_heartbeats WHERE id = $1`,
+    [id]
+  );
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
+export async function getLatestMarcusHeartbeat(): Promise<MarcusHeartbeat | null> {
+  const result = await pool.query(
+    `SELECT ${MARCUS_HEARTBEAT_COLUMNS_SQL} FROM marcus_heartbeats ORDER BY created_at DESC LIMIT 1`
+  );
+  return result.rows[0] ? formatRowDates(result.rows[0]) : null;
+}
+
+// Internal only -- not exposed via any route. Powers the trailing-average/
+// trend baselines for inventory_health/aging_inventory/discount_drift (see
+// marcusCategories.ts): `vehicles` is a live snapshot with no history of its
+// own, so those baselines are self-bootstrapped from Marcus's own prior
+// heartbeats instead.
+export async function getMarcusHeartbeatHistoryForBaseline(
+  limit = 90
+): Promise<{ created_at: string; metrics: Record<string, unknown> }[]> {
+  const result = await pool.query(
+    `SELECT created_at, metrics FROM marcus_heartbeats ORDER BY created_at DESC LIMIT $1`,
+    [limit]
+  );
+  return result.rows.map(formatRowDates);
+}
+
+// Rain-awareness (see marcusCategories.ts / jobs/marcus.ts): recently-
+// answered Scheduled Reports, so Marcus's narrative can reference rather
+// than repeat what a report already surfaced.
+export interface RecentAnsweredReportRun {
+  report_id: number | null;
+  report_name: string | null;
+  question: string;
+  summary: string;
+  narrative_summary: string | null;
+  created_at: string;
+}
+
+export async function getRecentAnsweredReportRuns(days: number, limit: number): Promise<RecentAnsweredReportRun[]> {
+  const result = await pool.query(
+    `SELECT rr.scheduled_report_id AS report_id, sr.name AS report_name, rr.question, rr.summary, rr.narrative_summary, rr.created_at
+     FROM report_runs rr
+     LEFT JOIN scheduled_reports sr ON sr.id = rr.scheduled_report_id
+     WHERE rr.status = 'answered' AND rr.created_at >= now() - make_interval(days => $1::int)
+     ORDER BY rr.created_at DESC
+     LIMIT $2`,
+    [days, limit]
+  );
+  return result.rows.map(formatRowDates);
 }
